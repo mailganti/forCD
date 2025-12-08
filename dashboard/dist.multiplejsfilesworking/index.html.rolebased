@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>orchestration-dashboard</title>
+    <!-- React / Vite bundle -->
+    <script type="module" crossorigin src="/assets/index-LSH9S5ot.js"></script>
+    <!-- Existing patch script (if you have one) -->
+    <script type="module" crossorigin src="execute_button_patch.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DaUUtcpb.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- 🔹 Bottom-right: Logout + Role Chip + Role Switcher -->
+    <script>
+      (function () {
+        // ========= Profile storage =========
+        function loadProfiles() {
+          let profiles = [];
+          try {
+            profiles = JSON.parse(localStorage.getItem("ssa_profiles") || "[]");
+          } catch {
+            profiles = [];
+          }
+
+          const currentToken =
+            localStorage.getItem("X-ADMIN-TOKEN") ||
+            localStorage.getItem("ADMIN_TOKEN") ||
+            null;
+          const currentRole = (
+            localStorage.getItem("ssa_role") || "admin"
+          ).toLowerCase();
+          const currentUser =
+            localStorage.getItem("ssa_username") || "current";
+
+          // If no profiles yet but we have a token, bootstrap one
+          if (profiles.length === 0 && currentToken) {
+            const id = "p-" + Date.now().toString(36);
+            const defaultProfile = {
+              id,
+              label: currentUser || "Default",
+              role: currentRole || "admin",
+              token: currentToken,
+            };
+            profiles.push(defaultProfile);
+            saveProfiles(profiles);
+            localStorage.setItem("ssa_active_profile_id", id);
+          }
+
+          return profiles;
+        }
+
+        function saveProfiles(profiles) {
+          try {
+            localStorage.setItem("ssa_profiles", JSON.stringify(profiles));
+          } catch (e) {
+            console.warn("Failed to save profiles:", e);
+          }
+        }
+
+        function getActiveProfile(profiles) {
+          const activeId = localStorage.getItem("ssa_active_profile_id");
+          if (!activeId) return null;
+          return profiles.find((p) => p.id === activeId) || null;
+        }
+
+        function setActiveProfile(id) {
+          const profiles = loadProfiles();
+          const profile = profiles.find((p) => p.id === id);
+          if (!profile) return;
+
+          try {
+            localStorage.setItem("ssa_active_profile_id", profile.id);
+            localStorage.setItem("ssa_role", profile.role || "admin");
+            localStorage.setItem("ssa_username", profile.label || "");
+            if (profile.token) {
+              localStorage.setItem("X-ADMIN-TOKEN", profile.token);
+              localStorage.setItem("ADMIN_TOKEN", profile.token);
+              localStorage.setItem("api_token", profile.token);
+            }
+          } catch (e) {
+            console.warn("Failed to activate profile:", e);
+          }
+
+          // Reload so the app starts using the new token/role
+          window.location.reload();
+        }
+
+        function formatRoleLabel(roleRaw) {
+          const role = (roleRaw || "").toLowerCase();
+          if (role === "admin") return "Admin";
+          if (role === "approver") return "Approver";
+          if (role === "executor") return "Executor";
+          if (role === "requestor" || role === "user") return "Requestor";
+          if (role === "viewer") return "Viewer";
+          return roleRaw
+            ? roleRaw.charAt(0).toUpperCase() + roleRaw.slice(1)
+            : "Admin";
+        }
+
+        function getRoleRaw() {
+          const active = getActiveProfile(loadProfiles());
+          if (active && active.role) return active.role;
+          try {
+            return localStorage.getItem("ssa_role") || "admin";
+          } catch {
+            return "admin";
+          }
+        }
+
+        function getRole() {
+          return getRoleRaw().toLowerCase();
+        }
+
+        // ========= Logout Button (bottom-right) =========
+        function createLogoutButton() {
+          if (document.getElementById("ssa-logout-btn")) return;
+
+          const btn = document.createElement("button");
+          btn.id = "ssa-logout-btn";
+          btn.textContent = "Logout";
+
+          Object.assign(btn.style, {
+            position: "fixed",
+            bottom: "1rem",
+            right: "1rem",
+            zIndex: "9999",
+            padding: "0.4rem 0.9rem",
+            borderRadius: "9999px",
+            border: "1px solid rgba(148,163,184,0.7)",
+            background: "rgba(15,23,42,0.96)",
+            color: "rgba(226,232,240,0.95)",
+            fontSize: "0.75rem",
+            fontWeight: "500",
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            boxShadow: "0 8px 20px rgba(15,23,42,0.85)",
+            cursor: "pointer",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+          });
+
+          btn.addEventListener("mouseenter", () => {
+            btn.style.background = "rgba(30,64,175,0.98)";
+            btn.style.borderColor = "rgba(129,140,248,1)";
+          });
+
+          btn.addEventListener("mouseleave", () => {
+            btn.style.background = "rgba(15,23,42,0.96)";
+            btn.style.borderColor = "rgba(148,163,184,0.7)";
+          });
+
+          btn.addEventListener("click", async () => {
+            try {
+              try {
+                localStorage.removeItem("ADMIN_TOKEN");
+                localStorage.removeItem("X-ADMIN-TOKEN");
+                localStorage.removeItem("X_ADMIN_TOKEN");
+                localStorage.removeItem("api_token");
+                localStorage.removeItem("ssa_role");
+                localStorage.removeItem("ssa_username");
+                localStorage.removeItem("ssa_profiles");
+                localStorage.removeItem("ssa_active_profile_id");
+              } catch (e) {
+                console.warn("Failed to clear localStorage tokens:", e);
+              }
+
+              try {
+                await fetch("/api/auth/logout", {
+                  method: "POST",
+                  credentials: "include",
+                });
+              } catch (e) {
+                console.warn("Logout API call failed (continuing):", e);
+              }
+            } finally {
+              window.location.href = "/login.html";
+            }
+          });
+
+          document.body.appendChild(btn);
+        }
+
+        // ========= Role Chip (bottom-right, left of Logout) =========
+        function createOrUpdateRoleChip() {
+          const profiles = loadProfiles();
+          const active = getActiveProfile(profiles);
+          const roleRaw = active?.role || getRoleRaw();
+          const label = formatRoleLabel(roleRaw);
+          const displayName = active?.label || "Profile";
+
+          let chip = document.getElementById("ssa-role-chip");
+          if (!chip) {
+            chip = document.createElement("button");
+            chip.id = "ssa-role-chip";
+
+            Object.assign(chip.style, {
+              position: "fixed",
+              bottom: "1.1rem",
+              right: "8.2rem",
+              zIndex: "9998",
+              padding: "0.3rem 0.75rem",
+              borderRadius: "9999px",
+              border: "1px solid rgba(148,163,184,0.7)",
+              background: "rgba(15,23,42,0.9)",
+              color: "rgba(226,232,240,0.9)",
+              fontSize: "0.7rem",
+              fontWeight: "500",
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              boxShadow: "0 8px 18px rgba(15,23,42,0.8)",
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.3rem",
+              cursor: "pointer",
+            });
+
+            const dot = document.createElement("span");
+            dot.id = "ssa-role-chip-dot";
+            Object.assign(dot.style, {
+              width: "0.45rem",
+              height: "0.45rem",
+              borderRadius: "9999px",
+            });
+
+            const text = document.createElement("span");
+            text.id = "ssa-role-chip-text";
+
+            const caret = document.createElement("span");
+            caret.id = "ssa-role-chip-caret";
+            caret.textContent = "▾";
+            Object.assign(caret.style, {
+              fontSize: "0.65rem",
+              opacity: "0.8",
+            });
+
+            chip.appendChild(dot);
+            chip.appendChild(text);
+            chip.appendChild(caret);
+
+            chip.addEventListener("click", (e) => {
+              e.stopPropagation();
+              toggleRoleMenu();
+            });
+
+            document.body.appendChild(chip);
+          }
+
+          const dot = document.getElementById("ssa-role-chip-dot");
+          const text = document.getElementById("ssa-role-chip-text");
+
+          if (text) {
+            text.textContent = `${displayName} · ${label}`;
+          }
+
+          let color = "rgba(148,163,184,1)";
+          let glow = "rgba(148,163,184,0.8)";
+
+          const r = getRole();
+          if (r === "admin") {
+            color = "rgba(248,250,252,1)";
+            glow = "rgba(251,191,36,0.9)";
+          } else if (r === "approver") {
+            color = "rgba(191,219,254,1)";
+            glow = "rgba(59,130,246,0.9)";
+          } else if (r === "executor") {
+            color = "rgba(252,211,77,1)";
+            glow = "rgba(234,179,8,0.9)";
+          } else if (r === "requestor" || r === "user") {
+            color = "rgba(190,242,100,1)";
+            glow = "rgba(132,204,22,0.9)";
+          } else if (r === "viewer") {
+            color = "rgba(196,181,253,1)";
+            glow = "rgba(168,85,247,0.9)";
+          }
+
+          if (dot) {
+            dot.style.background = color;
+            dot.style.boxShadow = "0 0 6px " + glow;
+          }
+        }
+
+        // ========= Role menu (profile switcher) =========
+        function closeRoleMenu() {
+          const menu = document.getElementById("ssa-role-menu");
+          if (menu) menu.remove();
+        }
+
+        function toggleRoleMenu() {
+          const existing = document.getElementById("ssa-role-menu");
+          if (existing) {
+            existing.remove();
+            return;
+          }
+
+          const profiles = loadProfiles();
+          const active = getActiveProfile(profiles);
+
+          const menu = document.createElement("div");
+          menu.id = "ssa-role-menu";
+
+          Object.assign(menu.style, {
+            position: "fixed",
+            bottom: "3.5rem",
+            right: "1rem",
+            zIndex: "9999",
+            minWidth: "220px",
+            borderRadius: "0.75rem",
+            border: "1px solid rgba(30,64,175,0.7)",
+            background: "rgba(15,23,42,0.98)",
+            color: "rgba(226,232,240,0.95)",
+            fontSize: "0.8rem",
+            boxShadow: "0 12px 30px rgba(15,23,42,0.85)",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            padding: "0.4rem 0",
+          });
+
+          const list = document.createElement("div");
+          list.style.maxHeight = "240px";
+          list.style.overflowY = "auto";
+
+          if (profiles.length === 0) {
+            const empty = document.createElement("div");
+            empty.textContent = "No profiles yet";
+            Object.assign(empty.style, {
+              padding: "0.4rem 0.9rem",
+              opacity: "0.7",
+            });
+            list.appendChild(empty);
+          } else {
+            profiles.forEach((p) => {
+              const item = document.createElement("button");
+              item.type = "button";
+              item.textContent =
+                (p.label || "Profile") +
+                " · " +
+                formatRoleLabel(p.role || "admin");
+
+              Object.assign(item.style, {
+                width: "100%",
+                textAlign: "left",
+                padding: "0.35rem 0.9rem",
+                background: "transparent",
+                border: "none",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: "0.78rem",
+              });
+
+              if (active && active.id === p.id) {
+                item.style.background = "rgba(30,64,175,0.85)";
+              }
+
+              item.addEventListener("mouseenter", () => {
+                if (!active || active.id !== p.id) {
+                  item.style.background = "rgba(30,64,175,0.5)";
+                }
+              });
+              item.addEventListener("mouseleave", () => {
+                if (!active || active.id !== p.id) {
+                  item.style.background = "transparent";
+                }
+              });
+
+              item.addEventListener("click", (e) => {
+                e.stopPropagation();
+                closeRoleMenu();
+                setActiveProfile(p.id);
+              });
+
+              list.appendChild(item);
+            });
+          }
+
+          // "Add role" button
+          const addBtn = document.createElement("button");
+          addBtn.type = "button";
+          addBtn.textContent = "+ Add role/token";
+          Object.assign(addBtn.style, {
+            width: "100%",
+            textAlign: "left",
+            padding: "0.4rem 0.9rem",
+            background: "transparent",
+            borderTop: "1px solid rgba(51,65,85,0.9)",
+            borderBottom: "none",
+            borderLeft: "none",
+            borderRight: "none",
+            color: "rgba(191,219,254,0.95)",
+            cursor: "pointer",
+            fontSize: "0.78rem",
+          });
+
+          addBtn.addEventListener("mouseenter", () => {
+            addBtn.style.background = "rgba(30,64,175,0.5)";
+          });
+          addBtn.addEventListener("mouseleave", () => {
+            addBtn.style.background = "transparent";
+          });
+
+          addBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            addProfileFlow();
+          });
+
+          menu.appendChild(list);
+          menu.appendChild(addBtn);
+          document.body.appendChild(menu);
+        }
+
+        function addProfileFlow() {
+          const label = prompt(
+            "Profile label (e.g. Prod Admin, Executor, Submitter):"
+          );
+          if (!label) return;
+
+          let role = prompt(
+            "Role (admin / approver / executor / requestor / viewer):",
+            "executor"
+          );
+          if (!role) return;
+          role = role.toLowerCase().trim();
+
+          const token = prompt(
+            "Paste the token value for this role (X-ADMIN-TOKEN):"
+          );
+          if (!token) return;
+
+          const profiles = loadProfiles();
+          const id = "p-" + Date.now().toString(36);
+
+          profiles.push({
+            id,
+            label: label.trim(),
+            role,
+            token: token.trim(),
+          });
+          saveProfiles(profiles);
+          localStorage.setItem("ssa_active_profile_id", id);
+          localStorage.setItem("ssa_role", role);
+          localStorage.setItem("ssa_username", label.trim());
+          localStorage.setItem("X-ADMIN-TOKEN", token.trim());
+          localStorage.setItem("ADMIN_TOKEN", token.trim());
+          localStorage.setItem("api_token", token.trim());
+
+          window.location.reload();
+        }
+
+        function init() {
+          createLogoutButton();
+          createOrUpdateRoleChip();
+
+          // Close menu when clicking outside
+          document.addEventListener("click", (e) => {
+            const menu = document.getElementById("ssa-role-menu");
+            const chip = document.getElementById("ssa-role-chip");
+            if (!menu) return;
+            if (chip && (chip === e.target || chip.contains(e.target))) return;
+            if (menu.contains(e.target)) return;
+            closeRoleMenu();
+          });
+        }
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", init);
+        } else {
+          init();
+        }
+      })();
+    </script>
+  </body>
+</html>

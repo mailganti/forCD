@@ -1,0 +1,584 @@
+// log_viewer.js - Add to your dashboard for viewing execution logs
+
+/**
+ * Log Viewer Component
+ * Displays execution logs in a modal with dark theme matching dashboard
+ */
+
+// Add this CSS to your dashboard (or include in <style> tag)
+const LOG_VIEWER_CSS = `
+<style>
+/* Log Viewer Modal */
+.log-modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(4px);
+}
+
+.log-modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.2s ease;
+}
+
+.log-modal-content {
+    background: rgba(26, 31, 58, 0.98);
+    border: 1px solid rgba(0, 188, 212, 0.3);
+    border-radius: 12px;
+    width: 90%;
+    max-width: 1000px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.log-modal-header {
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.log-modal-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #e0e7ff;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.log-modal-close {
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #fca5a5;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.log-modal-close:hover {
+    background: rgba(239, 68, 68, 0.3);
+}
+
+.log-modal-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.log-terminal {
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 8px;
+    padding: 1rem;
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 0.875rem;
+    color: #cbd5e1;
+    line-height: 1.5;
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+.log-line {
+    margin-bottom: 0.25rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.log-line-timestamp {
+    color: #64748b;
+}
+
+.log-line-info {
+    color: #60a5fa;
+}
+
+.log-line-success {
+    color: #34d399;
+}
+
+.log-line-warning {
+    color: #fbbf24;
+}
+
+.log-line-error {
+    color: #f87171;
+}
+
+.log-empty {
+    text-align: center;
+    padding: 2rem;
+    color: #64748b;
+}
+
+.log-loading {
+    text-align: center;
+    padding: 2rem;
+    color: #94a3b8;
+}
+
+.log-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(148, 163, 184, 0.3);
+    border-top-color: #00bcd4;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 0.5rem;
+}
+
+.log-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.log-btn {
+    padding: 0.5rem 1rem;
+    background: rgba(0, 188, 212, 0.15);
+    border: 1px solid rgba(0, 188, 212, 0.3);
+    color: #00bcd4;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.2s;
+    font-size: 0.875rem;
+}
+
+.log-btn:hover {
+    background: rgba(0, 188, 212, 0.25);
+}
+
+.log-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.log-info {
+    display: flex;
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+    padding: 0.875rem;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+
+.log-info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.log-info-label {
+    color: #64748b;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+}
+
+.log-info-value {
+    color: #cbd5e1;
+    font-weight: 500;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+</style>
+`;
+
+// Add this HTML to your dashboard (modal)
+const LOG_VIEWER_HTML = `
+<div id="logModal" class="log-modal">
+    <div class="log-modal-content">
+        <div class="log-modal-header">
+            <div class="log-modal-title">
+                <span>??</span>
+                <span>Execution Logs</span>
+            </div>
+            <button class="log-modal-close" onclick="logViewer.close()">? Close</button>
+        </div>
+        <div class="log-modal-body">
+            <div class="log-info" id="logInfo" style="display: none;">
+                <div class="log-info-item">
+                    <span class="log-info-label">Execution ID</span>
+                    <span class="log-info-value" id="logExecutionId">-</span>
+                </div>
+                <div class="log-info-item">
+                    <span class="log-info-label">Status</span>
+                    <span class="log-info-value" id="logStatus">-</span>
+                </div>
+                <div class="log-info-item">
+                    <span class="log-info-label">Started</span>
+                    <span class="log-info-value" id="logStarted">-</span>
+                </div>
+                <div class="log-info-item">
+                    <span class="log-info-label">Lines</span>
+                    <span class="log-info-value" id="logLines">-</span>
+                </div>
+            </div>
+            
+            <div class="log-actions">
+                <button class="log-btn" onclick="logViewer.refresh()" id="logRefreshBtn">
+                    ?? Refresh
+                </button>
+                <button class="log-btn" onclick="logViewer.download()" id="logDownloadBtn">
+                    ?? Download
+                </button>
+                <button class="log-btn" onclick="logViewer.toggleAutoRefresh()" id="logAutoRefreshBtn">
+                    ?? Auto-Refresh: OFF
+                </button>
+            </div>
+            
+            <div class="log-terminal" id="logContent">
+                <div class="log-loading">
+                    <span class="log-spinner"></span>
+                    Loading logs...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+`;
+
+// Log Viewer JavaScript
+const logViewer = {
+    currentExecutionId: null,
+    autoRefreshInterval: null,
+    autoRefreshEnabled: false,
+    
+    // Open log viewer for an execution
+    async open(executionId) {
+        this.currentExecutionId = executionId;
+        
+        // Show modal
+        const modal = document.getElementById('logModal');
+        modal.classList.add('show');
+        
+        // Load logs
+        await this.loadLogs();
+    },
+    
+    // Close log viewer
+    close() {
+        const modal = document.getElementById('logModal');
+        modal.classList.remove('show');
+        
+        // Stop auto-refresh
+        if (this.autoRefreshInterval) {
+            clearInterval(this.autoRefreshInterval);
+            this.autoRefreshInterval = null;
+        }
+        
+        this.currentExecutionId = null;
+    },
+    
+    // Load logs from API
+    async loadLogs() {
+        if (!this.currentExecutionId) return;
+        
+        const logContent = document.getElementById('logContent');
+        const logInfo = document.getElementById('logInfo');
+        
+        try {
+            // Show loading if no logs yet
+            if (logContent.children.length === 0) {
+                logContent.innerHTML = '<div class="log-loading"><span class="log-spinner"></span>Loading logs...</div>';
+            }
+            
+            // Fetch logs
+            const response = await fetch(`/api/executions/${this.currentExecutionId}/logs`, {
+                credentials: 'include'
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
+            const data = await response.json();
+            
+            // Update info
+            document.getElementById('logExecutionId').textContent = data.execution_id || '-';
+            document.getElementById('logStatus').textContent = data.status || '-';
+            document.getElementById('logStarted').textContent = data.started_at 
+                ? new Date(data.started_at).toLocaleString() 
+                : '-';
+            document.getElementById('logLines').textContent = data.total_lines || 0;
+            logInfo.style.display = 'flex';
+            
+            // Display logs
+            if (data.logs && data.logs.length > 0) {
+                logContent.innerHTML = data.logs.map(line => {
+                    return `<div class="log-line">${this.formatLogLine(line)}</div>`;
+                }).join('');
+                
+                // Auto-scroll to bottom
+                logContent.scrollTop = logContent.scrollHeight;
+            } else {
+                logContent.innerHTML = '<div class="log-empty">No logs available yet</div>';
+            }
+            
+        } catch (error) {
+            console.error('Failed to load logs:', error);
+            logContent.innerHTML = `<div class="log-empty">? Failed to load logs: ${error.message}</div>`;
+        }
+    },
+    
+    // Format log line with colors
+    formatLogLine(line) {
+        // Escape HTML
+        line = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        
+        // Detect log level and colorize
+        if (line.match(/ERROR|FAILED|Exception/i)) {
+            return `<span class="log-line-error">${line}</span>`;
+        } else if (line.match(/WARNING|WARN/i)) {
+            return `<span class="log-line-warning">${line}</span>`;
+        } else if (line.match(/SUCCESS|COMPLETED|?|?/i)) {
+            return `<span class="log-line-success">${line}</span>`;
+        } else if (line.match(/INFO/i)) {
+            return `<span class="log-line-info">${line}</span>`;
+        } else if (line.match(/^\[?\d{4}-\d{2}-\d{2}/)) {
+            return `<span class="log-line-timestamp">${line}</span>`;
+        }
+        
+        return line;
+    },
+    
+    // Refresh logs
+    async refresh() {
+        await this.loadLogs();
+    },
+    
+    // Toggle auto-refresh
+    toggleAutoRefresh() {
+        const btn = document.getElementById('logAutoRefreshBtn');
+        
+        if (this.autoRefreshEnabled) {
+            // Disable
+            clearInterval(this.autoRefreshInterval);
+            this.autoRefreshInterval = null;
+            this.autoRefreshEnabled = false;
+            btn.textContent = '?? Auto-Refresh: OFF';
+        } else {
+            // Enable (refresh every 3 seconds)
+            this.autoRefreshInterval = setInterval(() => {
+                this.loadLogs();
+            }, 3000);
+            this.autoRefreshEnabled = true;
+            btn.textContent = '?? Auto-Refresh: ON';
+        }
+    },
+    
+    // Download logs as text file
+    async download() {
+        if (!this.currentExecutionId) return;
+        
+        try {
+            const response = await fetch(`/api/executions/${this.currentExecutionId}/logs`, {
+                credentials: 'include'
+            });
+            
+            const data = await response.json();
+            
+            if (data.logs && data.logs.length > 0) {
+                const blob = new Blob([data.logs.join('\n')], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `execution_${this.currentExecutionId}_logs.txt`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+        } catch (error) {
+            console.error('Failed to download logs:', error);
+            alert('Failed to download logs: ' + error.message);
+        }
+    }
+};
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+    // Add CSS
+    const style = document.createElement('div');
+    style.innerHTML = LOG_VIEWER_CSS;
+    document.head.appendChild(style.firstChild);
+    
+    // Add HTML modal
+    const modalContainer = document.createElement('div');
+    modalContainer.innerHTML = LOG_VIEWER_HTML;
+    document.body.appendChild(modalContainer.firstChild);
+    
+    // Close modal when clicking outside
+    document.getElementById('logModal').addEventListener('click', (e) => {
+        if (e.target.id === 'logModal') {
+            logViewer.close();
+        }
+    });
+});
+
+// Export for use in dashboard
+window.logViewer = logViewer;
+/* inline_log_viewer.js - Adds "View Logs" buttons to dashboard */
+
+/**
+ * This patch adds log viewing capability to your existing dashboard
+ * without changing your design or layout
+ */
+
+(function() {
+    console.log('[LOG VIEWER PATCH] Loading...');
+    
+    // Store execution IDs for workflows
+    const workflowExecutions = {};
+    
+    // Track the last executeWorkflow call to capture execution ID
+    if (window.app && typeof window.app.executeWorkflow === 'function') {
+        const originalExecute = window.app.executeWorkflow;
+        
+        window.app.executeWorkflow = async function(workflow) {
+            console.log('[LOG VIEWER] Intercepting workflow execution');
+            
+            try {
+                // Call original execute function
+                const result = await originalExecute.call(this, workflow);
+                
+                // Store execution ID for this workflow
+                if (result && result.execution_id) {
+                    workflowExecutions[workflow.workflow_id] = result.execution_id;
+                    console.log(`[LOG VIEWER] Stored execution ${result.execution_id} for workflow ${workflow.workflow_id}`);
+                    
+                    // Re-render to add View Logs button
+                    setTimeout(() => addLogButtons(), 500);
+                }
+                
+                return result;
+            } catch (error) {
+                console.error('[LOG VIEWER] Execute error:', error);
+                throw error;
+            }
+        };
+    }
+    
+    // Function to add "View Logs" buttons next to Execute buttons
+    function addLogButtons() {
+        console.log('[LOG VIEWER] Adding log buttons...');
+        
+        // Find all workflow rows
+        const workflowRows = document.querySelectorAll('[class*="workflow"], [id*="workflow"]');
+        
+        workflowRows.forEach(row => {
+            // Skip if already has log button
+            if (row.querySelector('.view-logs-btn')) {
+                return;
+            }
+            
+            // Find workflow ID from the row
+            const workflowId = extractWorkflowId(row);
+            if (!workflowId) return;
+            
+            // Check if this workflow has been executed
+            const executionId = workflowExecutions[workflowId];
+            if (!executionId) return;
+            
+            // Find Execute button or actions area
+            const executeBtn = row.querySelector('button[onclick*="execute"]');
+            const actionsArea = executeBtn ? executeBtn.parentElement : row.querySelector('[class*="actions"]');
+            
+            if (actionsArea) {
+                // Create View Logs button
+                const logBtn = document.createElement('button');
+                logBtn.className = 'view-logs-btn btn-execute';
+                logBtn.style.marginLeft = '0.5rem';
+                logBtn.style.background = 'linear-gradient(135deg, #0097a7 0%, #006064 100%)';
+                logBtn.textContent = '📋 View Logs';
+                logBtn.onclick = () => {
+                    console.log(`[LOG VIEWER] Opening logs for execution ${executionId}`);
+                    window.logViewer.open(executionId);
+                };
+                
+                actionsArea.appendChild(logBtn);
+                console.log(`[LOG VIEWER] Added log button for workflow ${workflowId}`);
+            }
+        });
+    }
+    
+    // Extract workflow ID from row element
+    function extractWorkflowId(element) {
+        // Try to find workflow ID in various ways
+        const text = element.textContent || element.innerText;
+        
+        // Look for ID: wf_xxx pattern
+        const idMatch = text.match(/ID:\s*(wf_[a-f0-9]+)/i);
+        if (idMatch) return idMatch[1];
+        
+        // Look for onclick with workflow ID
+        const executeBtn = element.querySelector('button[onclick*="execute"]');
+        if (executeBtn) {
+            const onclick = executeBtn.getAttribute('onclick');
+            const match = onclick.match(/['"]?(wf_[a-f0-9]+)['"]?/);
+            if (match) return match[1];
+        }
+        
+        return null;
+    }
+    
+    // Monitor for workflow renders
+    const observer = new MutationObserver(() => {
+        addLogButtons();
+    });
+    
+    // Start observing when DOM is ready
+    function startObserving() {
+        const workflowsContainer = document.querySelector('[id*="workflows"]') || document.body;
+        observer.observe(workflowsContainer, {
+            childList: true,
+            subtree: true
+        });
+        
+        // Initial run
+        addLogButtons();
+        
+        console.log('[LOG VIEWER PATCH] Observing workflow changes');
+    }
+    
+    // Initialize
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startObserving);
+    } else {
+        startObserving();
+    }
+    
+    // Also add buttons after any data load
+    if (window.app && typeof window.app.loadData === 'function') {
+        const originalLoadData = window.app.loadData;
+        
+        window.app.loadData = async function() {
+            const result = await originalLoadData.call(this);
+            setTimeout(() => addLogButtons(), 500);
+            return result;
+        };
+    }
+    
+    console.log('[LOG VIEWER PATCH] Loaded successfully');
+})();

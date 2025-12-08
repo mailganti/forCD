@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>orchestration-dashboard</title>
+
+    <!-- Your exact Vite build imports (do not change) -->
+    <script type="module" crossorigin src="/assets/index-LSH9S5ot.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DaUUtcpb.css" />
+  </head>
+
+  <body>
+    <!-- React root -->
+    <div id="root"></div>
+
+    <!-- =============================================================== -->
+    <!--  UNIVERSAL UI OVERLAY LAYER (SAFE ABOVE REACT)                -->
+    <!-- =============================================================== -->
+
+    <script>
+      /*
+      ============================================================
+      ROLE SWITCHER + LOGOUT + ROLE CHIP + USERNAME DISPLAY
+      ============================================================
+      */
+
+      (function () {
+        // Load stored profiles
+        function loadProfiles() {
+          let profiles = [];
+          try {
+            profiles = JSON.parse(localStorage.getItem("ssa_profiles") || "[]");
+          } catch {
+            profiles = [];
+          }
+
+          const currentToken =
+            localStorage.getItem("X-ADMIN-TOKEN") ||
+            localStorage.getItem("ADMIN_TOKEN") ||
+            null;
+          const currentRole =
+            (localStorage.getItem("ssa_role") || "admin").toLowerCase();
+          const currentUser = localStorage.getItem("ssa_username") || "current";
+
+          if (profiles.length === 0 && currentToken) {
+            const id = "p-" + Date.now().toString(36);
+            const defaultProfile = {
+              id,
+              label: currentUser || "Default",
+              role: currentRole || "admin",
+              token: currentToken,
+            };
+            profiles.push(defaultProfile);
+            saveProfiles(profiles);
+            localStorage.setItem("ssa_active_profile_id", id);
+          }
+
+          return profiles;
+        }
+
+        function saveProfiles(profiles) {
+          try {
+            localStorage.setItem("ssa_profiles", JSON.stringify(profiles));
+          } catch {}
+        }
+
+        function getActiveProfile(profiles) {
+          const activeId = localStorage.getItem("ssa_active_profile_id");
+          if (!activeId) return null;
+          return profiles.find((p) => p.id === activeId) || null;
+        }
+
+        function formatRoleLabel(roleRaw) {
+          const role = (roleRaw || "").toLowerCase();
+          if (role === "admin") return "Admin";
+          if (role === "approver") return "Approver";
+          if (role === "executor") return "Executor";
+          if (role === "requestor" || role === "user") return "Requestor";
+          if (role === "viewer") return "Viewer";
+          return roleRaw
+            ? roleRaw.charAt(0).toUpperCase() + roleRaw.slice(1)
+            : "Admin";
+        }
+
+        // ------------------------------------------------------------
+        // CREATE LOGOUT BUTTON
+        // ------------------------------------------------------------
+        function createLogoutButton() {
+          if (document.getElementById("ssa-logout-btn")) return;
+
+          const btn = document.createElement("button");
+          btn.id = "ssa-logout-btn";
+          btn.textContent = "Logout";
+
+          Object.assign(btn.style, {
+            position: "fixed",
+            bottom: "1rem",
+            right: "1rem",
+            zIndex: 99999,
+            padding: "0.4rem 0.9rem",
+            borderRadius: "9999px",
+            border: "1px solid rgba(148,163,184,0.7)",
+            background: "rgba(15,23,42,0.96)",
+            color: "rgba(226,232,240,0.95)",
+            fontSize: "0.75rem",
+            textTransform: "uppercase",
+            boxShadow: "0 8px 20px rgba(15,23,42,0.85)",
+            cursor: "pointer",
+            backdropFilter: "blur(10px)",
+          });
+
+          btn.onmouseenter = () => {
+            btn.style.background = "rgba(30,64,175,0.98)";
+            btn.style.borderColor = "rgba(129,140,248,1)";
+          };
+
+          btn.onmouseleave = () => {
+            btn.style.background = "rgba(15,23,42,0.96)";
+            btn.style.borderColor = "rgba(148,163,184,0.7)";
+          };
+
+          btn.onclick = () => {
+            localStorage.clear();
+            window.location.href = "/login.html";
+          };
+
+          document.body.appendChild(btn);
+        }
+
+        // ------------------------------------------------------------
+        // CREATE USERNAME DISPLAY (non-interactive)
+        // ------------------------------------------------------------
+        function createUsernameDisplay() {
+          if (document.getElementById("ssa-username-display")) return;
+          const user = localStorage.getItem("ssa_username") || "User";
+
+          const box = document.createElement("div");
+          box.id = "ssa-username-display";
+          box.textContent = user;
+
+          Object.assign(box.style, {
+            position: "fixed",
+            bottom: "3.1rem",
+            right: "1rem",
+            zIndex: 99990,
+            padding: "0.35rem 0.85rem",
+            borderRadius: "9999px",
+            background: "rgba(15,23,42,0.85)",
+            border: "1px solid rgba(148,163,184,0.5)",
+            color: "rgba(226,232,240,0.92)",
+            fontSize: "0.75rem",
+            pointerEvents: "none",
+            boxShadow: "0 6px 14px rgba(0,0,0,0.5)",
+          });
+
+          document.body.appendChild(box);
+        }
+
+        // ------------------------------------------------------------
+        // CREATE ROLE CHIP + SWITCHER
+        // ------------------------------------------------------------
+        function getRoleRaw() {
+          return (
+            localStorage.getItem("ssa_role")?.toLowerCase() || "admin"
+          ).toLowerCase();
+        }
+
+        function createOrUpdateRoleChip() {
+          let chip = document.getElementById("ssa-role-chip");
+          const profiles = loadProfiles();
+          const active = getActiveProfile(profiles);
+          const role = active?.role || getRoleRaw();
+          const label = formatRoleLabel(role);
+          const displayName = active?.label || "Profile";
+
+          if (!chip) {
+            chip = document.createElement("button");
+            chip.id = "ssa-role-chip";
+
+            Object.assign(chip.style, {
+              position: "fixed",
+              bottom: "1rem",
+              right: "8rem",
+              zIndex: 99999,
+              padding: "0.4rem 0.75rem",
+              borderRadius: "9999px",
+              border: "1px solid rgba(148,163,184,0.7)",
+              background: "rgba(15,23,42,0.9)",
+              color: "rgba(226,232,240,0.9)",
+              fontSize: "0.7rem",
+              fontWeight: 500,
+              boxShadow: "0 8px 18px rgba(15,23,42,0.8)",
+              cursor: "pointer",
+            });
+
+            chip.onclick = toggleRoleMenu;
+            document.body.appendChild(chip);
+          }
+
+          chip.textContent = `${displayName} · ${label}`;
+        }
+
+        function toggleRoleMenu() {
+          const existing = document.getElementById("ssa-role-menu");
+          if (existing) return existing.remove();
+
+          const profiles = loadProfiles();
+          const menu = document.createElement("div");
+          menu.id = "ssa-role-menu";
+
+          Object.assign(menu.style, {
+            position: "fixed",
+            bottom: "4rem",
+            right: "1rem",
+            zIndex: 99999,
+            width: "220px",
+            background: "rgba(15,23,42,0.98)",
+            borderRadius: "0.75rem",
+            border: "1px solid rgba(30,64,175,0.7)",
+            color: "rgba(226,232,240,0.95)",
+            padding: "0.6rem 0",
+            backdropFilter: "blur(12px)",
+          });
+
+          profiles.forEach((p) => {
+            const item = document.createElement("button");
+            Object.assign(item.style, {
+              width: "100%",
+              padding: "0.45rem 0.9rem",
+              background: "transparent",
+              textAlign: "left",
+              border: "none",
+              color: "inherit",
+              cursor: "pointer",
+            });
+
+            item.textContent = `${p.label} · ${formatRoleLabel(p.role)}`;
+            item.onclick = () => {
+              localStorage.setItem("ssa_active_profile_id", p.id);
+              localStorage.setItem("X-ADMIN-TOKEN", p.token);
+              localStorage.setItem("ADMIN_TOKEN", p.token);
+              localStorage.setItem("api_token", p.token);
+              localStorage.setItem("ssa_role", p.role);
+              localStorage.setItem("ssa_username", p.label);
+              window.location.reload();
+            };
+
+            menu.appendChild(item);
+          });
+
+          const addBtn = document.createElement("button");
+          addBtn.textContent = "+ Add role/token";
+          Object.assign(addBtn.style, {
+            width: "100%",
+            padding: "0.45rem 0.9rem",
+            textAlign: "left",
+            background: "transparent",
+            color: "rgba(191,219,254,0.95)",
+            border: "none",
+            cursor: "pointer",
+          });
+          addBtn.onclick = () => {
+            const label = prompt("Profile label:");
+            if (!label) return;
+
+            const role = prompt(
+              "Role (admin/approver/executor/requestor/viewer):"
+            );
+            if (!role) return;
+
+            const token = prompt("Token value:");
+            if (!token) return;
+
+            const profiles = loadProfiles();
+            const id = "p-" + Date.now().toString(36);
+            profiles.push({ id, label, role: role.toLowerCase(), token });
+
+            saveProfiles(profiles);
+            localStorage.setItem("ssa_active_profile_id", id);
+            localStorage.setItem("ssa_role", role.toLowerCase());
+            localStorage.setItem("ssa_username", label);
+            localStorage.setItem("X-ADMIN-TOKEN", token);
+            window.location.reload();
+          };
+
+          menu.appendChild(addBtn);
+          document.body.appendChild(menu);
+        }
+
+        // ------------------------------------------------------------
+        // PERMISSIONS LEGEND (collapsible)
+        // ------------------------------------------------------------
+
+        const PERMISSIONS = {
+          admin: {
+            label: "Admin",
+            abilities: [
+              { text: "Execute workflows", ok: true },
+              { text: "Execute scripts", ok: true },
+              { text: "Approve workflows", ok: true },
+              { text: "Create workflows", ok: true },
+              { text: "Manage tokens", ok: true },
+              { text: "Register agents/scripts", ok: true },
+              { text: "Delete items", ok: true },
+              { text: "View everything", ok: true },
+            ],
+          },
+
+          approver: {
+            label: "Approver",
+            abilities: [
+              { text: "Approve workflows", ok: true },
+              { text: "View workflows", ok: true },
+              { text: "View scripts", ok: true },
+              { text: "Execute workflows", ok: false },
+              { text: "Execute scripts", ok: false },
+              { text: "Create workflows", ok: false },
+              { text: "Manage tokens", ok: false },
+            ],
+          },
+
+          executor: {
+            label: "Executor",
+            abilities: [
+              { text: "Execute workflows", ok: true },
+              { text: "Execute scripts", ok: true },
+              { text: "View workflows", ok: true },
+              { text: "Approve workflows", ok: false },
+              { text: "Create workflows", ok: false },
+              { text: "Manage tokens", ok: false },
+            ],
+          },
+
+          requestor: {
+            label: "Requestor",
+            abilities: [
+              { text: "Create workflows", ok: true },
+              { text: "View workflows", ok: true },
+              { text: "View scripts", ok: true },
+              { text: "Execute", ok: false },
+              { text: "Approve", ok: false },
+              { text: "Manage tokens", ok: false },
+            ],
+          },
+
+          viewer: {
+            label: "Viewer",
+            abilities: [
+              { text: "View workflows", ok: true },
+              { text: "View scripts", ok: true },
+              { text: "Execute", ok: false },
+              { text: "Approve", ok: false },
+              { text: "Create", ok: false },
+            ],
+          },
+        };
+
+        function createPermissionsLegend() {
+          if (document.getElementById("ssa-perm-pill")) return;
+
+          const minimized =
+            localStorage.getItem("ssa_perm_minimized") === "true";
+
+          const pill = document.createElement("div");
+          pill.id = "ssa-perm-pill";
+          pill.textContent = minimized ? "Permissions (min)" : "Permissions";
+
+          Object.assign(pill.style, {
+            position: "fixed",
+            bottom: "1rem",
+            left: "1rem",
+            zIndex: 99999,
+            padding: "0.4rem 0.9rem",
+            borderRadius: "9999px",
+            border: "1px solid rgba(148,163,184,0.7)",
+            background: "rgba(15,23,42,0.96)",
+            color: "rgba(226,232,240,0.95)",
+            fontSize: "0.75rem",
+            cursor: "pointer",
+          });
+
+          const panel = document.createElement("div");
+          panel.id = "ssa-perm-panel";
+
+          Object.assign(panel.style, {
+            position: "fixed",
+            bottom: "4rem",
+            left: "1rem",
+            zIndex: 99999,
+            width: "260px",
+            padding: "0.75rem 1rem",
+            background: "rgba(15,23,42,0.96)",
+            border: "1px solid rgba(148,163,184,0.7)",
+            borderRadius: "0.75rem",
+            color: "rgba(226,232,240,0.95)",
+            backdropFilter: "blur(12px)",
+            display: minimized ? "none" : "block",
+          });
+
+          const title = document.createElement("div");
+          title.id = "ssa-perm-title";
+          title.style.fontWeight = "600";
+          title.style.marginBottom = "0.5rem";
+
+          const list = document.createElement("div");
+          list.id = "ssa-perm-list";
+          list.style.display = "flex";
+          list.style.flexDirection = "column";
+          list.style.gap = "0.2rem";
+
+          panel.appendChild(title);
+          panel.appendChild(list);
+
+          pill.onclick = () => {
+            const isMin = panel.style.display === "none";
+            localStorage.setItem("ssa_perm_minimized", isMin ? "false" : "true");
+            panel.style.display = isMin ? "block" : "none";
+            pill.textContent = isMin ? "Permissions" : "Permissions (min)";
+          };
+
+          document.body.appendChild(pill);
+          document.body.appendChild(panel);
+
+          renderPermissionsPanel();
+        }
+
+        function renderPermissionsPanel() {
+          const role = getRoleRaw();
+          const roleData = PERMISSIONS[role] || PERMISSIONS.admin;
+
+          const title = document.getElementById("ssa-perm-title");
+          const list = document.getElementById("ssa-perm-list");
+
+          if (!title || !list) return;
+
+          title.textContent = "Role: " + roleData.label;
+          list.innerHTML = "";
+
+          roleData.abilities.forEach((a) => {
+            const row = document.createElement("div");
+            row.style.display = "flex";
+            row.style.gap = "0.4rem";
+
+            const icon = document.createElement("span");
+            icon.textContent = a.ok ? "✓" : "✗";
+            icon.style.color = a.ok ? "rgb(74,222,128)" : "rgb(239,68,68)";
+            icon.style.fontWeight = "700";
+
+            const text = document.createElement("span");
+            text.textContent = a.text;
+
+            row.appendChild(icon);
+            row.appendChild(text);
+            list.appendChild(row);
+          });
+        }
+
+        // ------------------------------------------------------------
+        // ROLE BASED UI FILTERING (safe)
+        // ------------------------------------------------------------
+        (function () {
+          const ROLE = (localStorage.getItem("ssa_role") || "admin").toLowerCase();
+
+          const FILTERS = {
+            admin: [],
+            approver: ["execute", "register", "delete", "manage"],
+            executor: ["approve", "register", "delete", "manage"],
+            requestor: ["approve", "execute", "manage", "register"],
+            viewer: ["approve", "execute", "register", "delete", "manage"],
+          };
+
+          function applyRoleFilter() {
+            const hideList = FILTERS[ROLE] || [];
+            const nodes = document.querySelectorAll("button, a, [role='button'], .btn");
+
+            nodes.forEach((el) => {
+              const text = (el.textContent || "").toLowerCase();
+              const shouldHide = hideList.some((kw) => text.includes(kw));
+
+              if (shouldHide) {
+                el.style.visibility = "hidden";
+                el.style.pointerEvents = "none";
+                el.style.opacity = "0";
+              } else {
+                el.style.visibility = "";
+                el.style.pointerEvents = "";
+                el.style.opacity = "";
+              }
+            });
+          }
+
+          document.addEventListener("DOMContentLoaded", applyRoleFilter);
+
+          new MutationObserver(applyRoleFilter).observe(document.body, {
+            childList: true,
+            subtree: true,
+          });
+        })();
+
+        // ------------------------------------------------------------
+        // INIT ALL OVERLAY ELEMENTS
+        // ------------------------------------------------------------
+        function init() {
+          createLogoutButton();
+          createUsernameDisplay();
+          createOrUpdateRoleChip();
+          createPermissionsLegend();
+        }
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", init);
+        } else {
+          init();
+        }
+      })();
+    </script>
+<script>
+(function() {
+//    'use strict';
+    
+    // ========== PART 1: MODAL COMPONENT ==========
+    // (from log_viewer.js)
+    
+    // Add CSS
+    const style = document.createElement('style');
+    style.textContent = `/* all the CSS */`;
+    document.head.appendChild(style);
+    
+    // Add HTML
+    const modalHTML = `<div id="logModal">...</div>`;
+    document.body.appendChild(...);
+    
+    // Create window.logViewer object
+    window.logViewer = {
+        open: function(id) { ... },
+        close: function() { ... },
+        loadLogs: function() { ... },
+        refresh: function() { ... },
+        download: function() { ... }
+    };
+    
+    // ========== PART 2: BUTTON ADDER ==========
+    // (from add_log_viewer_patch.js)
+    
+    // Storage for execution IDs
+    window.workflowExecutions = {};
+    
+    // Function to add buttons
+    function addViewLogsButton(workflowElement) { ... }
+    
+    // Function to scan for workflows
+    function scanForWorkflows() { ... }
+    
+    // Intercept fetch to capture execution IDs
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) { ... };
+    
+    // ========== PART 3: INITIALIZATION ==========
+    
+    function init() {
+        scanForWorkflows();
+        setInterval(scanForWorkflows, 5000);
+    }
+    
+    // Wait for page to be ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        setTimeout(init, 1000);
+    }
+    
+})();
+
+</script>
+  </body>
+</html>
