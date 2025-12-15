@@ -1,0 +1,25 @@
+# In your test script
+import os
+os.environ["EMAIL_DRY_RUN"] = "true"
+
+# Import and test the module
+from controller.emailer import send_email, send_approval_request
+
+# Test basic email
+send_email(
+    to="test@example.com",
+    subject="Test Email",
+    html_body="<h1>Test</h1><p>This is a test email</p>"
+)
+
+# Test approval request
+send_approval_request(
+    approver_email="approver@example.com",
+    requestor="John Doe",
+    requestor_email="john@example.com",
+    workflow_id="WF-12345",
+    script_id="backup_script.sh",
+    targets=["agent1", "agent2"],
+    reason="Monthly backup",
+    dashboard_url="http://localhost:5000/dashboard"
+)
