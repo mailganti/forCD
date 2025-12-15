@@ -1,0 +1,439 @@
+# controller/emailer.py
+"""
+Email sending module for the Orchestration System.
+Uses OS's sendmail/mail command for reliable email delivery.
+"""
+
+import os
+import logging
+import subprocess
+import tempfile
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from typing import Optional, List, Union
+
+logger = logging.getLogger(__name__)
+
+# Configuration
+SMTP_FROM = os.getenv("SMTP_FROM", "orchestration@localhost")
+EMAIL_DRY_RUN = os.getenv("EMAIL_DRY_RUN", "false").lower() == "true"
+SENDMAIL_PATH = os.getenv("SENDMAIL_PATH", "")  # Custom path if needed
+
+# Try to find sendmail in common locations
+DEFAULT_SENDMAIL_PATHS = [
+    "/usr/sbin/sendmail",
+    "/usr/lib/sendmail",
+    "/usr/local/bin/sendmail",
+    "sendmail",  # Use from PATH
+]
+
+
+def find_sendmail() -> str:
+    """Find sendmail binary in common locations."""
+    if SENDMAIL_PATH and os.path.exists(SENDMAIL_PATH):
+        return SENDMAIL_PATH
+    
+    for path in DEFAULT_SENDMAIL_PATHS:
+        try:
+            # Check if executable exists and is executable
+            if path == "sendmail":
+                # Check in PATH
+                result = subprocess.run(["which", "sendmail"], 
+                                      capture_output=True, text=True)
+                if result.returncode == 0:
+                    found_path = result.stdout.strip()
+                    if os.path.exists(found_path):
+                        logger.debug(f"Found sendmail at: {found_path}")
+                        return found_path
+            elif os.path.exists(path) and os.access(path, os.X_OK):
+                logger.debug(f"Found sendmail at: {path}")
+                return path
+        except Exception:
+            continue
+    
+    # Last resort: try common mail command
+    mail_paths = ["/usr/bin/mail", "mail"]
+    for path in mail_paths:
+        try:
+            if path == "mail":
+                result = subprocess.run(["which", "mail"], 
+                                      capture_output=True, text=True)
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            elif os.path.exists(path):
+                return path
+        except Exception:
+            continue
+    
+    raise FileNotFoundError(
+        "Could not find sendmail or mail command. "
+        "Please install postfix, sendmail, or mailutils."
+    )
+
+
+def send_email(
+    to: Union[str, List[str]],
+    subject: str,
+    html_body: str,
+    text_body: Optional[str] = None,
+    from_addr: Optional[str] = None,
+    cc: Optional[Union[str, List[str]]] = None,
+    bcc: Optional[Union[str, List[str]]] = None,
+    reply_to: Optional[str] = None,
+) -> bool:
+    """
+    Send an email using OS's sendmail/mail command.
+    
+    Args:
+        to: Recipient email address(es)
+        subject: Email subject
+        html_body: HTML content of the email
+        text_body: Plain text fallback (auto-generated if not provided)
+        from_addr: Sender address (defaults to SMTP_FROM)
+        cc: CC recipients
+        bcc: BCC recipients
+        reply_to: Reply-To address
+        
+    Returns:
+        True if email was sent successfully, False otherwise
+    """
+    # Normalize recipients to lists
+    if isinstance(to, str):
+        to = [to.strip() for to_addr in to.split(',')]
+    if isinstance(cc, str):
+        cc = [cc.strip() for cc_addr in cc.split(',')]
+    if isinstance(bcc, str):
+        bcc = [bcc.strip() for bcc_addr in bcc.split(',')]
+    
+    # Filter empty addresses
+    to = [addr.strip() for addr in to if addr and addr.strip()]
+    cc = [addr.strip() for addr in (cc or []) if addr and addr.strip()]
+    bcc = [addr.strip() for addr in (bcc or []) if addr and addr.strip()]
+    
+    if not to:
+        logger.warning("No recipients specified, skipping email")
+        return False
+    
+    sender = from_addr or SMTP_FROM
+    
+    # Build MIME message
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = ", ".join(to)
+    
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    if reply_to:
+        msg["Reply-To"] = reply_to
+    
+    # Add plain text part (fallback)
+    if not text_body:
+        import re
+        text_body = re.sub(r'<[^>]+>', '', html_body)
+        text_body = re.sub(r'\s+', ' ', text_body).strip()
+    
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    
+    # Dry run mode - just log
+    if EMAIL_DRY_RUN:
+        logger.info(f"[DRY RUN] Email would be sent:")
+        logger.info(f"  To: {', '.join(to)}")
+        logger.info(f"  CC: {', '.join(cc) if cc else 'None'}")
+        logger.info(f"  Subject: {subject}")
+        logger.info(f"  From: {sender}")
+        logger.info(f"  Reply-To: {reply_to if reply_to else 'None'}")
+        return True
+    
+    try:
+        # Find and use sendmail
+        sendmail_path = find_sendmail()
+        logger.debug(f"Using mailer: {sendmail_path}")
+        
+        # Prepare the email content
+        email_content = msg.as_string()
+        
+        # Use sendmail command with -t flag (read recipients from To:, Cc:, Bcc: headers)
+        # -t: Read recipients from message headers
+        # -oi: Ignore dots on lines by themselves (end of message)
+        # -f: Set envelope sender (optional, some systems require it)
+        
+        cmd = [sendmail_path, "-t", "-oi"]
+        
+        # Try to set envelope sender (not all systems support -f)
+        try:
+            # First try with -f option
+            result = subprocess.run([sendmail_path, "-f", sender, "-t", "-oi"],
+                                  input=email_content.encode('utf-8'),
+                                  capture_output=True,
+                                  timeout=30)
+        except subprocess.CalledProcessError:
+            # If -f fails, try without it
+            result = subprocess.run([sendmail_path, "-t", "-oi"],
+                                  input=email_content.encode('utf-8'),
+                                  capture_output=True,
+                                  timeout=30)
+        
+        # Check result
+        if result.returncode == 0:
+            logger.info(f"Email sent successfully to {', '.join(to)}: {subject}")
+            if result.stdout:
+                logger.debug(f"Sendmail output: {result.stdout.decode()}")
+            return True
+        else:
+            logger.error(f"Sendmail failed with exit code {result.returncode}")
+            if result.stderr:
+                logger.error(f"Sendmail error: {result.stderr.decode()}")
+            if result.stdout:
+                logger.error(f"Sendmail output: {result.stdout.decode()}")
+            
+            # Fallback: Try using mail command instead
+            return send_email_via_mail_command(to, subject, text_body, html_body, 
+                                             sender, cc, bcc, reply_to)
+            
+    except FileNotFoundError as e:
+        logger.error(f"Sendmail not found: {e}")
+        # Fallback to SMTP or mail command
+        return send_email_via_mail_command(to, subject, text_body, html_body, 
+                                         sender, cc, bcc, reply_to)
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}")
+        return False
+
+
+def send_email_via_mail_command(
+    to: List[str],
+    subject: str,
+    text_body: str,
+    html_body: str,
+    from_addr: str,
+    cc: Optional[List[str]] = None,
+    bcc: Optional[List[str]] = None,
+    reply_to: Optional[str] = None,
+) -> bool:
+    """
+    Fallback method using mail/mailx command.
+    Note: This method doesn't support HTML, only plain text.
+    """
+    try:
+        # Find mail command
+        mail_paths = ["/usr/bin/mail", "/bin/mail", "mail", "/usr/bin/mailx"]
+        mail_cmd = None
+        
+        for path in mail_paths:
+            try:
+                if path in ["mail", "mailx"]:
+                    result = subprocess.run(["which", path], 
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        mail_cmd = result.stdout.strip()
+                        break
+                elif os.path.exists(path):
+                    mail_cmd = path
+                    break
+            except Exception:
+                continue
+        
+        if not mail_cmd:
+            logger.error("mail command not found")
+            return False
+        
+        # Prepare recipients
+        all_recipients = to + (cc or []) + (bcc or [])
+        
+        # Create a temporary file with the email content
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+            # Write headers manually
+            tmp.write(f"From: {from_addr}\n")
+            tmp.write(f"To: {', '.join(to)}\n")
+            if cc:
+                tmp.write(f"Cc: {', '.join(cc)}\n")
+            if reply_to:
+                tmp.write(f"Reply-To: {reply_to}\n")
+            tmp.write(f"Subject: {subject}\n")
+            tmp.write(f"Content-Type: text/plain; charset=utf-8\n")
+            tmp.write("\n")  # Blank line separates headers from body
+            tmp.write(text_body)
+            tmp_path = tmp.name
+        
+        try:
+            # Send email using mail command
+            cmd = [mail_cmd, "-s", subject]
+            
+            # Try to set from address (not all mail commands support -r)
+            try:
+                # First try with -r flag (set from address)
+                cmd = [mail_cmd, "-s", subject, "-r", from_addr] + all_recipients
+                result = subprocess.run(cmd, 
+                                      input=text_body.encode('utf-8'),
+                                      capture_output=True,
+                                      timeout=30)
+            except:
+                # Try without -r flag
+                cmd = [mail_cmd, "-s", subject] + all_recipients
+                result = subprocess.run(cmd, 
+                                      input=text_body.encode('utf-8'),
+                                      capture_output=True,
+                                      timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"Email sent via mail command to {', '.join(to)}")
+                return True
+            else:
+                logger.error(f"Mail command failed: {result.stderr.decode()}")
+                return False
+                
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+                
+    except Exception as e:
+        logger.error(f"Failed to send email via mail command: {e}")
+        return False
+
+
+def send_approval_request(
+    approver_email: str,
+    requestor: str,
+    requestor_email: str,
+    workflow_id: str,
+    script_id: str,
+    targets: List[str],
+    reason: str,
+    dashboard_url: str,
+    ttl_minutes: int = 60,
+) -> bool:
+    """
+    Send approval request email to approver.
+    """
+    html_content = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #1e3a5f;">Workflow Approval Required</h2>
+        <p>A new workflow has been submitted and requires your approval.</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+            <tr style="background: #f8f9fa;">
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Workflow ID</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{workflow_id}</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Requestor</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6;">{requestor}</td>
+            </tr>
+            <tr style="background: #f8f9fa;">
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Requestor Email</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6;"><a href="mailto:{requestor_email}">{requestor_email}</a></td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Script</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{script_id}</td>
+            </tr>
+            <tr style="background: #f8f9fa;">
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Target Agents</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6;">{', '.join(targets)}</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Reason</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6;">{reason}</td>
+            </tr>
+            <tr style="background: #f8f9fa;">
+                <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Expires In</td>
+                <td style="padding: 10px; border: 1px solid #dee2e6;">{ttl_minutes} minutes</td>
+            </tr>
+        </table>
+        
+        <p style="margin: 20px 0;">
+            <a href="{dashboard_url}" style="background: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">
+                Open Dashboard to Approve
+            </a>
+        </p>
+        
+        <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">
+            This is an automated message from the Orchestration System.<br>
+            Requested by: {requestor}
+        </p>
+    </div>
+    """
+    
+    return send_email(
+        to=approver_email,
+        subject=f"[Action Required] Workflow Approval: {script_id} - {requestor}",
+        html_body=html_content,
+        reply_to=requestor_email,
+    )
+
+
+def test_email_system() -> bool:
+    """
+    Test if email system is working.
+    
+    Returns:
+        True if test email was sent successfully
+    """
+    logger.info("Testing email system...")
+    
+    # Test 1: Check for sendmail/mail command
+    try:
+        sendmail_path = find_sendmail()
+        logger.info(f"Found mailer: {sendmail_path}")
+    except FileNotFoundError as e:
+        logger.error(f"Test failed: {e}")
+        logger.info("Please install mail utilities:")
+        logger.info("  Ubuntu/Debian: sudo apt-get install mailutils")
+        logger.info("  RHEL/CentOS: sudo yum install mailx")
+        logger.info("  Alpine: sudo apk add mailx")
+        return False
+    
+    # Test 2: Try to send a test email
+    test_result = send_email(
+        to=SMTP_FROM,  # Send to ourselves
+        subject="Email System Test",
+        html_body="<h1>Test Email</h1><p>If you receive this, the email system is working.</p>",
+        text_body="Test Email: If you receive this, the email system is working."
+    )
+    
+    if test_result:
+        logger.info("✓ Email system test passed")
+        logger.info("Check your mailbox for the test email")
+    else:
+        logger.error("✗ Email system test failed")
+        logger.info("Check mail logs: sudo tail -f /var/log/mail.log")
+    
+    return test_result
+
+
+# Compatibility wrapper for existing code that might expect SMTP config
+SMTP_HOST = "localhost"  # For compatibility
+SMTP_PORT = 25  # For compatibility
+
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Run system test
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        success = test_email_system()
+        sys.exit(0 if success else 1)
+    else:
+        # Send a test email
+        print("Sending test email...")
+        success = send_email(
+            to=os.getenv("TEST_EMAIL", SMTP_FROM),
+            subject="Test Email from Orchestration System",
+            html_body="""
+            <h1>Test Email</h1>
+            <p>This is a test email sent using the OS's mail system.</p>
+            <p>If you receive this, everything is working correctly.</p>
+            """,
+            text_body="Test email from Orchestration System"
+        )
+        print(f"Success: {success}")
