@@ -1,25 +1,176 @@
 # In your test script
-import os
-os.environ["EMAIL_DRY_RUN"] = "true"
+#!/usr/bin/env python3
+"""
+Test script for emailer module
+"""
 
-# Import and test the module
+import os
+import sys
+import asyncio
+from contextlib import contextmanager
+from typing import List
+
+# Add parent directory to path if needed
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from controller.emailer import send_email, send_approval_request
 
-# Test basic email
-send_email(
-    to="test@example.com",
-    subject="Test Email",
-    html_body="<h1>Test</h1><p>This is a test email</p>"
-)
 
-# Test approval request
-send_approval_request(
-    approver_email="approver@example.com",
-    requestor="John Doe",
-    requestor_email="john@example.com",
-    workflow_id="WF-12345",
-    script_id="backup_script.sh",
-    targets=["agent1", "agent2"],
-    reason="Monthly backup",
-    dashboard_url="http://localhost:5000/dashboard"
-)
+def test_basic_email():
+    """Test sending a basic email"""
+    print("Testing basic email...")
+    
+    success = send_email(
+        to=["recipient1@example.com", "recipient2@example.com"],
+        subject="Test Email Subject",
+        html_body="""
+        <h1>Hello!</h1>
+        <p>This is a <b>test email</b> with HTML content.</p>
+        <ul>
+            <li>Item 1</li>
+            <li>Item 2</li>
+            <li>Item 3</li>
+        </ul>
+        """,
+        text_body="Plain text version of the email",
+        cc="cc@example.com",
+        bcc=["bcc1@example.com", "bcc2@example.com"],
+        reply_to="noreply@example.com"
+    )
+    
+    print(f"✓ Email sent successfully: {success}")
+    return success
+
+
+def test_approval_request():
+    """Test sending an approval request email"""
+    print("\nTesting approval request email...")
+    
+    success = send_approval_request(
+        approver_email="approver@company.com",
+        requestor="Alice Smith",
+        requestor_email="alice@company.com",
+        workflow_id="WF-2024-001",
+        script_id="database_backup.py",
+        targets=["db-server-1", "db-server-2", "db-server-3"],
+        reason="Scheduled quarterly database maintenance and backup",
+        dashboard_url="http://localhost:8080/approve/WF-2024-001",
+        ttl_minutes=120
+    )
+    
+    print(f"✓ Approval request sent: {success}")
+    return success
+
+
+def test_error_cases():
+    """Test error handling"""
+    print("\nTesting error cases...")
+    
+    # Test 1: No recipients
+    print("Test 1: No recipients")
+    success1 = send_email(to=[], subject="Test", html_body="Test")
+    print(f"  Result: {success1} (expected: False)")
+    
+    # Test 2: Invalid email address format
+    print("\nTest 2: Invalid email format")
+    success2 = send_email(to=["not-an-email"], subject="Test", html_body="Test")
+    print(f"  Result: {success2}")
+    
+    # Test 3: Empty strings
+    print("\nTest 3: Empty recipient strings")
+    success3 = send_email(to=["", "test@example.com", ""], subject="Test", html_body="Test")
+    print(f"  Result: {success3}")
+    
+    return all([not success1, success2 is not None, success3 is not None])
+
+
+@contextmanager
+def set_env_vars(**kwargs):
+    """Context manager to temporarily set environment variables"""
+    original = {}
+    try:
+        for key, value in kwargs.items():
+            original[key] = os.environ.get(key)
+            os.environ[key] = value
+        yield
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_with_mock_smtp():
+    """Test with a mock SMTP server"""
+    print("\nTesting with mock SMTP configuration...")
+    
+    # Set up for MailHog/local SMTP
+    env_vars = {
+        "SMTP_HOST": "localhost",
+        "SMTP_PORT": "1025",
+        "SMTP_FROM": "test@localhost",
+        "EMAIL_DRY_RUN": "false"
+    }
+    
+    with set_env_vars(**env_vars):
+        # Reload module to pick up new env vars
+        import importlib
+        import controller.emailer
+        importlib.reload(controller.emailer)
+        
+        # Import again after reload
+        from controller.emailer import send_email
+        
+        try:
+            success = send_email(
+                to="test@example.com",
+                subject="Mock SMTP Test",
+                html_body="<p>Testing with mock SMTP server</p>"
+            )
+            print(f"✓ Mock SMTP test completed: {success}")
+            return success
+        except Exception as e:
+            print(f"✗ Mock SMTP test failed: {e}")
+            return False
+
+
+def run_all_tests():
+    """Run all tests"""
+    print("=" * 60)
+    print("Emailer Module Test Suite")
+    print("=" * 60)
+    
+    # Test 1: Basic email with dry run
+    os.environ["EMAIL_DRY_RUN"] = "true"
+    test1 = test_basic_email()
+    
+    # Test 2: Approval request with dry run
+    test2 = test_approval_request()
+    
+    # Test 3: Error cases
+    test3 = test_error_cases()
+    
+    # Test 4: Optional - with real SMTP
+    # test4 = test_with_mock_smtp()
+    
+    print("\n" + "=" * 60)
+    print("Test Results Summary:")
+    print(f"Basic email test: {'✓ PASS' if test1 else '✗ FAIL'}")
+    print(f"Approval request test: {'✓ PASS' if test2 else '✗ FAIL'}")
+    print(f"Error handling test: {'✓ PASS' if test3 else '✗ FAIL'}")
+    # print(f"Mock SMTP test: {'✓ PASS' if test4 else '✗ FAIL'}")
+    print("=" * 60)
+    
+    return all([test1, test2, test3])
+
+
+if __name__ == "__main__":
+    # For quick testing, use dry run mode by default
+    if len(sys.argv) > 1 and sys.argv[1] == "--live":
+        # Remove dry run for live testing
+        if "EMAIL_DRY_RUN" in os.environ:
+            del os.environ["EMAIL_DRY_RUN"]
+    
+    success = run_all_tests()
+    sys.exit(0 if success else 1)
