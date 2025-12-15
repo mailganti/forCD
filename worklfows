@@ -1,0 +1,629 @@
+# controller/routes/workflows.py - SSL-compatible workflow routes
+
+from fastapi import APIRouter, HTTPException, Depends, Body, BackgroundTasks, Request
+from pydantic import BaseModel
+from typing import List, Optional
+import logging
+import uuid
+import os
+import httpx
+
+from controller.db.db import get_db
+from controller.deps import verify_token, require_admin, require_approver, verify_approver_jwt, require_execution_token
+
+# Safe email import - won't crash if emailer module is missing
+try:
+    from controller.emailer import send_email
+    EMAIL_ENABLED = True
+except ImportError:
+    EMAIL_ENABLED = False
+    def send_email(*args, **kwargs):
+        logging.getLogger(__name__).warning("Email module not available - email not sent")
+        return False
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+# SSL Configuration
+SSL_ENABLED = os.getenv("SSL_ENABLED", "true").lower() == "true"
+SSL_VERIFY = os.getenv("SSL_VERIFY", "false").lower() == "true"
+SSL_CA_CERTS = os.getenv("SSL_CA_CERTS", "./certs/certChain.pem")
+
+
+# =============================================================================
+# Request Models
+# =============================================================================
+
+class CreateWorkflowRequest(BaseModel):
+    script_id: str
+    targets: List[str]
+    requestor: str
+    reason: str
+    required_approval_levels: int = 1
+    ttl_minutes: int = 60
+    notify_email: str = ""        # Approver's email
+    requestor_email: str = ""     # Requestor's email for notifications
+
+
+class ApproveWorkflowRequest(BaseModel):
+    approver: str
+    level: int = 1
+
+
+class ExecuteWorkflowRequest(BaseModel):
+    parameters: Optional[dict] = None
+    environment: Optional[dict] = None
+    timeout: Optional[int] = None
+
+
+class ReexecRequest(BaseModel):
+    note: Optional[str] = None
+    requester_email: Optional[str] = None
+
+
+class ApprovePayload(BaseModel):
+    request_id: int
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def get_ssl_verify_config():
+    if not SSL_VERIFY:
+        return False
+    if SSL_CA_CERTS and os.path.exists(SSL_CA_CERTS):
+        return SSL_CA_CERTS
+    return False
+
+
+async def notify_agent_of_workflow(
+    agent_host: str,
+    agent_port: int,
+    workflow_id: str,
+    ssl_enabled: bool = False
+) -> bool:
+    """Notify agent that a workflow is ready for execution"""
+    protocol = "https" if ssl_enabled else "http"
+    url = f"{protocol}://{agent_host}:{agent_port}/execute-workflow"
+
+    verify_ssl = get_ssl_verify_config()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=verify_ssl) as client:
+            response = await client.post(url, json={"workflow_id": workflow_id})
+            return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Failed to notify agent at {url}: {e}")
+        return False
+
+
+# =============================================================================
+# Endpoints
+# =============================================================================
+
+@router.get("")
+@router.get("/")
+async def list_workflows(
+    limit: Optional[int] = None,
+    status: Optional[str] = None,
+    token: dict = Depends(verify_token)
+):
+    """List workflows with optional filters"""
+    try:
+        db = get_db()
+        workflows = db.list_workflows(limit=limit, status=status)
+        return {
+            "workflows": workflows,
+            "count": len(workflows),
+            "ssl_enabled": SSL_ENABLED
+        }
+    except Exception as e:
+        logger.error(f"Error listing workflows: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{workflow_id}")
+async def get_workflow(
+    workflow_id: str,
+    token: dict = Depends(verify_token)
+):
+    """Get a workflow by ID"""
+    db = get_db()
+    workflow = db.get_workflow(workflow_id)
+
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    return workflow
+
+
+@router.post("")
+@router.post("/")
+async def create_workflow(
+    request: CreateWorkflowRequest,
+    token: dict = Depends(verify_token)
+):
+    """Create a new workflow and notify approver"""
+    db = get_db()
+    workflow_id = f"wf_{uuid.uuid4().hex[:12]}"
+
+    try:
+        # Try with requestor_email (newer DB schema)
+        try:
+            workflow = db.create_workflow(
+                workflow_id=workflow_id,
+                script_id=request.script_id,
+                targets=request.targets,
+                requestor=request.requestor,
+                required_levels=request.required_approval_levels,
+                notify_email=request.notify_email,
+                requestor_email=request.requestor_email,
+                ttl_minutes=request.ttl_minutes,
+                reason=request.reason
+            )
+        except TypeError:
+            # Fallback for older DB schema without requestor_email
+            workflow = db.create_workflow(
+                workflow_id=workflow_id,
+                script_id=request.script_id,
+                targets=request.targets,
+                requestor=request.requestor,
+                required_levels=request.required_approval_levels,
+                notify_email=request.notify_email,
+                ttl_minutes=request.ttl_minutes,
+                reason=request.reason
+            )
+            # Store requestor_email in workflow dict for email notifications
+            workflow["requestor_email"] = request.requestor_email
+
+        db.add_audit(
+            workflow_id=workflow_id,
+            action="created",
+            user=request.requestor,
+            note=f"Workflow created: {request.reason}"
+        )
+
+        logger.info(f"Workflow created: {workflow_id}")
+        
+        # Send email notification to approver
+        logger.info(f"[EMAIL] notify_email={request.notify_email}, requestor_email={request.requestor_email}, EMAIL_ENABLED={EMAIL_ENABLED}")
+        
+        if request.notify_email:
+            logger.info(f"[EMAIL] Attempting to send approval notification to {request.notify_email}")
+            try:
+                api_host = os.getenv("API_HOST", "https://localhost:7585")
+                dashboard_url = f"{api_host}/dashboard"
+                requestor_contact = f"<a href='mailto:{request.requestor_email}'>{request.requestor_email}</a>" if request.requestor_email else request.requestor
+                
+                html_content = f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #1e3a5f;">Workflow Approval Required</h2>
+                    <p>A new workflow has been submitted and requires your approval.</p>
+                    
+                    <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                        <tr style="background: #f8f9fa;">
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Workflow ID</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{workflow_id}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Requestor</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;">{request.requestor}</td>
+                        </tr>
+                        <tr style="background: #f8f9fa;">
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Requestor Email</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;">{requestor_contact}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Script</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{request.script_id}</td>
+                        </tr>
+                        <tr style="background: #f8f9fa;">
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Target Agents</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;">{', '.join(request.targets)}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Reason</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;">{request.reason}</td>
+                        </tr>
+                        <tr style="background: #f8f9fa;">
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Expires In</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;">{request.ttl_minutes} minutes</td>
+                        </tr>
+                    </table>
+                    
+                    <p style="margin: 20px 0;">
+                        <a href="{dashboard_url}" style="background: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">
+                            Open Dashboard to Approve
+                        </a>
+                    </p>
+                    
+                    <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">
+                        This is an automated message from the Orchestration System.<br>
+                        Requested by: {request.requestor}
+                    </p>
+                </div>
+                """
+                
+                result = send_email(
+                    to=request.notify_email,
+                    subject=f"[Action Required] Workflow Approval: {request.script_id} - {request.requestor}",
+                    html_body=html_content
+                )
+                logger.info(f"[EMAIL] send_email returned: {result}")
+                logger.info(f"Approval notification sent to {request.notify_email} for workflow {workflow_id}")
+                
+            except Exception as email_error:
+                logger.error(f"Failed to send approval email: {email_error}")
+                # Don't fail workflow creation if email fails
+        
+        return workflow
+
+    except Exception as e:
+        logger.error(f"Error creating workflow: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{workflow_id}/approve")
+async def approve_workflow(
+    workflow_id: str,
+    request: ApproveWorkflowRequest,
+    user: dict = Depends(require_approver)
+):
+    """Approve a workflow and notify requestor"""
+    db = get_db()
+
+    workflow = db.get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    if workflow["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"Workflow is already {workflow['status']}")
+
+    success = db.add_approval(workflow_id, request.approver, request.level)
+    if not success:
+        raise HTTPException(status_code=400, detail="Already approved by this user")
+
+    workflow = db.get_workflow(workflow_id)
+    approvals = workflow.get("approvals", [])
+
+    if len(approvals) >= workflow["required_approval_levels"]:
+        db.update_workflow_status(workflow_id, "approved")
+        db.add_audit(workflow_id=workflow_id, action="fully_approved", user=request.approver, note="Workflow fully approved")
+        logger.info(f"Workflow approved: {workflow_id}")
+        
+        # Send approval notification to requestor
+        requestor_email = workflow.get("requestor_email") or workflow.get("notify_email")
+        if requestor_email:
+            try:
+                api_host = os.getenv("API_HOST", "https://localhost:7585")
+                dashboard_url = f"{api_host}/dashboard"
+                
+                html_content = f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #059669;">✅ Workflow Approved</h2>
+                    <p>Your workflow has been approved and is ready for execution.</p>
+                    
+                    <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                        <tr style="background: #f8f9fa;">
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Workflow ID</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{workflow_id}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Script</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{workflow.get('script_id', 'N/A')}</td>
+                        </tr>
+                        <tr style="background: #f8f9fa;">
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Approved By</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;">{request.approver}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Status</td>
+                            <td style="padding: 10px; border: 1px solid #dee2e6;"><span style="color: #059669; font-weight: bold;">APPROVED</span></td>
+                        </tr>
+                    </table>
+                    
+                    <p style="margin: 20px 0;">
+                        <a href="{dashboard_url}" style="background: #059669; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">
+                            Open Dashboard to Execute
+                        </a>
+                    </p>
+                    
+                    <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">
+                        This is an automated message from the Orchestration System.
+                    </p>
+                </div>
+                """
+                
+                send_email(
+                    to=requestor_email,
+                    subject=f"[Approved] Workflow Ready: {workflow.get('script_id', workflow_id)}",
+                    html_body=html_content
+                )
+                logger.info(f"Approval notification sent to {requestor_email} for workflow {workflow_id}")
+                
+            except Exception as email_error:
+                logger.error(f"Failed to send approval notification: {email_error}")
+        
+        return {"message": "Workflow fully approved", "workflow_id": workflow_id, "status": "approved"}
+
+    db.add_audit(workflow_id=workflow_id, action="partial_approval", user=request.approver,
+                 note=f"Approval {len(approvals)}/{workflow['required_approval_levels']}")
+
+    return {
+        "message": "Approval added",
+        "workflow_id": workflow_id,
+        "approvals": len(approvals),
+        "required": workflow["required_approval_levels"]
+    }
+
+
+@router.post("/{workflow_id}/execute")
+async def execute_workflow(
+    workflow_id: str,
+    background_tasks: BackgroundTasks,
+    request: Optional[ExecuteWorkflowRequest] = Body(default=None),
+    user: dict = Depends(require_admin)
+):
+    """Execute an approved workflow (one-time only)"""
+    db = get_db()
+
+    workflow = db.get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    # Check workflow status - only "approved" can be executed
+    status = workflow.get("status")
+    if status == "executed":
+        raise HTTPException(status_code=400, detail="Workflow has already been executed")
+    if status == "denied":
+        raise HTTPException(status_code=400, detail="Workflow was denied")
+    if status == "expired":
+        raise HTTPException(status_code=400, detail="Workflow has expired")
+    if status != "approved":
+        raise HTTPException(status_code=400, detail=f"Workflow is not approved (status: {status})")
+
+    script_id = workflow.get("script_id")
+    if not script_id:
+        raise HTTPException(status_code=400, detail="Workflow has no script")
+
+    targets = workflow.get("targets") or []
+    if not targets:
+        raise HTTPException(status_code=400, detail="Workflow has no targets")
+
+    # Import and call scripts execution
+    from controller.routes.scripts import ExecuteScriptRequest, execute_script
+
+    exec_request = ExecuteScriptRequest(
+        target_agents=targets,
+        parameters=(request.parameters if request and request.parameters else {}),
+        environment=(request.environment if request and request.environment else {}),
+        timeout=(request.timeout if request and request.timeout else None),
+    )
+
+    # Mark as executing before we start (prevents concurrent execution)
+    db.update_workflow_status(workflow_id, "executing")
+    
+    try:
+        result = await execute_script(
+            script_id=script_id,
+            request=exec_request,
+            background_tasks=background_tasks,
+            user=user
+        )
+        
+        # Mark as executed after successful execution
+        db.update_workflow_status(workflow_id, "executed")
+        db.add_audit(workflow_id=workflow_id, action="executed", 
+                     user=user.get("username", "unknown"), note="Workflow executed successfully")
+        
+        return {
+            "message": "Workflow executed",
+            "workflow_id": workflow_id,
+            "status": "executed",
+            "script_result": result
+        }
+        
+    except Exception as e:
+        # Mark as failed but don't allow re-execution
+        db.update_workflow_status(workflow_id, "failed")
+        db.add_audit(workflow_id=workflow_id, action="execution_failed",
+                     user=user.get("username", "unknown"), note=str(e))
+        raise
+
+
+@router.delete("/{workflow_id}")
+async def delete_workflow(
+    workflow_id: str,
+    token: dict = Depends(verify_token)
+):
+    """Delete a workflow"""
+    db = get_db()
+
+    workflow = db.get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    db.delete_workflow(workflow_id)
+    logger.info(f"Workflow deleted: {workflow_id}")
+
+    return {"message": "Workflow deleted", "workflow_id": workflow_id}
+
+
+class DenyWorkflowRequest(BaseModel):
+    denier: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@router.post("/{workflow_id}/deny")
+async def deny_workflow(
+    workflow_id: str,
+    request: DenyWorkflowRequest = Body(default=None),
+    user: dict = Depends(require_approver)
+):
+    """Deny a pending workflow and notify requestor"""
+    db = get_db()
+
+    workflow = db.get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    if workflow["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"Cannot deny workflow with status: {workflow['status']}")
+
+    denier = request.denier if request and request.denier else user.get("username", "unknown")
+    reason = request.reason if request and request.reason else "Denied"
+    
+    db.update_workflow_status(workflow_id, "denied")
+    db.add_audit(workflow_id=workflow_id, action="denied", user=denier, note=reason)
+    
+    logger.info(f"Workflow denied: {workflow_id} by {denier}")
+    
+    # Send denial notification to requestor
+    requestor_email = workflow.get("requestor_email") or workflow.get("notify_email")
+    if requestor_email:
+        try:
+            html_content = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #dc2626;">❌ Workflow Denied</h2>
+                <p>Your workflow request has been denied.</p>
+                
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                    <tr style="background: #f8f9fa;">
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Workflow ID</td>
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{workflow_id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Script</td>
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-family: monospace;">{workflow.get('script_id', 'N/A')}</td>
+                    </tr>
+                    <tr style="background: #f8f9fa;">
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Denied By</td>
+                        <td style="padding: 10px; border: 1px solid #dee2e6;">{denier}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Reason</td>
+                        <td style="padding: 10px; border: 1px solid #dee2e6;">{reason}</td>
+                    </tr>
+                    <tr style="background: #f8f9fa;">
+                        <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Status</td>
+                        <td style="padding: 10px; border: 1px solid #dee2e6;"><span style="color: #dc2626; font-weight: bold;">DENIED</span></td>
+                    </tr>
+                </table>
+                
+                <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">
+                    If you believe this was in error, please contact the approver or submit a new workflow request.
+                </p>
+            </div>
+            """
+            
+            send_email(
+                to=requestor_email,
+                subject=f"[Denied] Workflow Request: {workflow.get('script_id', workflow_id)}",
+                html_body=html_content
+            )
+            logger.info(f"Denial notification sent to {requestor_email} for workflow {workflow_id}")
+            
+        except Exception as email_error:
+            logger.error(f"Failed to send denial notification: {email_error}")
+
+    return {
+        "message": "Workflow denied",
+        "workflow_id": workflow_id,
+        "status": "denied",
+        "denier": denier,
+        "reason": reason
+    }
+
+
+@router.get("/{workflow_id}/audit")
+async def get_workflow_audit(
+    workflow_id: str,
+    token: dict = Depends(verify_token)
+):
+    """Get audit logs for a workflow"""
+    db = get_db()
+
+    workflow = db.get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    logs = db.get_audit_logs(workflow_id)
+
+    return {
+        "workflow_id": workflow_id,
+        "audit_logs": logs,
+        "count": len(logs)
+    }
+
+
+# =============================================================================
+# Re-execution Approval Flow
+# =============================================================================
+
+@router.post("/{workflow_id}/reexec/request")
+async def request_reexecution(
+    workflow_id: str,
+    payload: ReexecRequest,
+    user: dict = Depends(verify_token)
+):
+    """Request approval for re-execution of a workflow"""
+    db = get_db()
+    wf = db.get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    requester = user.get('username') or user.get('token_name') or 'unknown'
+    requester_email = payload.requester_email or wf.get('notify_email')
+    req = db.create_execution_approval_request(workflow_id, requester, requester_email, payload.note or "")
+
+    approver_target = wf.get('notify_email') or requester_email
+    if not approver_target:
+        logger.warning("No approver email configured for workflow %s", workflow_id)
+        return {"message": "Approval request created", "request": req}
+
+    api_host = os.getenv("API_HOST", "http://localhost:8000")
+    approve_url = f"{api_host}/api/workflows/{workflow_id}/reexec/approve?request_id={req['id']}"
+
+    html = f"""
+    <p>A request to execute workflow <strong>{workflow_id}</strong> was created by {requester}.</p>
+    <p>Note: {payload.note or '(none)'}</p>
+    <p>To approve: <code>POST {approve_url}</code></p>
+    """
+
+    send_email(approver_target, f"Execution approval required for {workflow_id}", html)
+    return {"message": "Approval request created and approver notified", "request": req}
+
+
+@router.post("/{workflow_id}/reexec/approve")
+async def approve_reexecution(
+    workflow_id: str,
+    payload: ApprovePayload,
+    approver_jwt: dict = Depends(verify_approver_jwt)
+):
+    """Approve a re-execution request (requires approver JWT)"""
+    db = get_db()
+    req = db.get_execution_approval_request(payload.request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    if req['workflow_id'] != workflow_id:
+        raise HTTPException(status_code=400, detail="Mismatched workflow")
+    if req['status'] != 'pending':
+        raise HTTPException(status_code=400, detail="Request not pending")
+
+    approver = approver_jwt.get('sub') or approver_jwt.get('username') or 'approver'
+    token_row = db.approve_execution_request(payload.request_id, approver)
+    if not token_row:
+        raise HTTPException(status_code=500, detail="Failed to approve request")
+
+    requester_email = req.get('requester_email') or (db.get_workflow(workflow_id) or {}).get('notify_email')
+    if requester_email:
+        html = f"""
+        <p>Your execution request for workflow <strong>{workflow_id}</strong> has been approved.</p>
+        <p>Token expires: {token_row.get('expires_at')}</p>
+        <pre>{token_row.get('token')}</pre>
+        """
+        send_email(requester_email, f"Execution token for {workflow_id}", html)
+
+    return {"message": "Approved and token issued", "token_id": token_row.get('id')}
