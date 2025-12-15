@@ -293,6 +293,8 @@
                     <div class="form-grid">
                         <div class="form-group"><div class="form-label">Script ID</div><select class="form-input" id="wfScriptId"><option value="">Loading scripts...</option></select></div>
                         <div class="form-group"><div class="form-label">Requestor</div><input type="text" class="form-input" id="wfRequestor" value="" readonly></div>
+                        <div class="form-group"><div class="form-label">Requestor Email</div><input type="email" class="form-input" id="wfRequestorEmail" placeholder="your.email@company.com"></div>
+                        <div class="form-group"><div class="form-label">Approver Email</div><input type="email" class="form-input" id="wfApproverEmail" placeholder="approver@company.com" required></div>
                         <div class="form-group full">
                             <div class="form-label">Target Agents (<span id="selectedCount">0</span> selected)</div>
                             <div class="agent-selector" id="agentSelector"><div style="padding: 0.25rem; text-align: center; color: var(--text-secondary); font-size: 11px;">No agents registered. Register an agent first →</div></div>
@@ -310,8 +312,9 @@
                         <div class="logs-content" id="logsContent">
                             <div class="logs-path" id="logsPath"></div>
                             <div class="logs-actions">
-                                <button class="btn" onclick="viewLogfile()">View Logfile</button>
-                                <button class="btn btn-primary" onclick="viewLiveLogs()">Live Logs</button>
+                                <button class="btn btn-primary" id="btnViewHtml" onclick="viewHtmlLog()" style="display:none;">View HTML</button>
+                                <button class="btn" id="btnViewText" onclick="viewTextLog()" style="display:none;">View Text</button>
+                                <button class="btn" onclick="viewLiveLogs()">Live Tail</button>
                             </div>
                         </div>
                     </div>
@@ -375,6 +378,10 @@
                         const methodLabels = { 'smartcard': '🔐 Smart Card', 'cert': '🔐 Smart Card', 'wna': '🪟 Windows Auth', 'password': '🔑 Password' };
                         document.getElementById('authMethod').textContent = methodLabels[method] || method;
                         document.getElementById('wfRequestor').value = data.user.username || displayName;
+                        // Auto-populate requestor email if available
+                        if (data.user.email) {
+                            document.getElementById('wfRequestorEmail').value = data.user.email;
+                        }
                         addLog(`Authenticated as ${displayName}`, 'success');
                     } else {
                         window.location.href = '/login.html';
@@ -449,7 +456,7 @@
                     <td><span class="badge badge-${wf.status}">${wf.status}</span></td>
                     <td style="font-size: 11px; color: var(--text-secondary);">${formatDate(wf.created_at)}</td>
                     <td class="text-right">
-                        ${hasLogs ? '<span class="badge badge-logs">Logs</span>' : ''}
+                        ${hasLogs ? `<span class="badge badge-logs" style="cursor:pointer;" onclick="event.stopPropagation(); openWorkflowLog('${wf.workflow_id}')">Logs</span>` : ''}
                         ${wf.status === 'pending' ? `
                             <button class="action-btn action-btn-secondary" onclick="event.stopPropagation(); approveWorkflow('${wf.workflow_id}')">Approve</button>
                             <button class="action-btn action-btn-danger" onclick="event.stopPropagation(); denyWorkflow('${wf.workflow_id}')">Deny</button>
@@ -486,15 +493,36 @@
         async function createWorkflow() {
             const scriptId = document.getElementById('wfScriptId').value;
             const requestor = document.getElementById('wfRequestor').value.trim();
+            const requestorEmail = document.getElementById('wfRequestorEmail').value.trim();
+            const approverEmail = document.getElementById('wfApproverEmail').value.trim();
             const reason = document.getElementById('wfReason').value.trim();
+            
             if (!scriptId) { addLog('Please select a script', 'error'); return; }
             if (!requestor || !reason) { addLog('Please fill in all workflow fields', 'error'); return; }
+            if (!approverEmail) { addLog('Please enter approver email for notifications', 'error'); return; }
             if (selectedAgents.length === 0) { addLog('Please select at least one target agent', 'error'); return; }
+            
             try {
-                await apiCall('/workflows', { method: 'POST', body: JSON.stringify({ script_id: scriptId, targets: selectedAgents, requestor, reason, required_approval_levels: 1, ttl_minutes: 60 }) });
-                addLog('Workflow created successfully', 'success');
-                document.getElementById('wfScriptId').selectedIndex = 0; document.getElementById('wfReason').value = '';
-                selectedAgents = []; document.getElementById('selectedCount').textContent = '0'; loadData();
+                await apiCall('/workflows', { 
+                    method: 'POST', 
+                    body: JSON.stringify({ 
+                        script_id: scriptId, 
+                        targets: selectedAgents, 
+                        requestor, 
+                        requestor_email: requestorEmail,
+                        notify_email: approverEmail,
+                        reason, 
+                        required_approval_levels: 1, 
+                        ttl_minutes: 60 
+                    }) 
+                });
+                addLog('Workflow created - approval notification sent to ' + approverEmail, 'success');
+                document.getElementById('wfScriptId').selectedIndex = 0; 
+                document.getElementById('wfReason').value = '';
+                document.getElementById('wfApproverEmail').value = '';
+                selectedAgents = []; 
+                document.getElementById('selectedCount').textContent = '0'; 
+                loadData();
             } catch (err) { addLog(`Failed to create workflow: ${err.message}`, 'error'); }
         }
 
@@ -528,12 +556,13 @@
                     addLog(`⚠️ Workflow ${id} completed with ${failureCount} failure(s)`, 'error');
                 }
                 
-                // Extract logfile if present
+                // Extract logfiles (HTML and text) if present
                 const stdout = result?.script_result?.results?.[0]?.result?.stdout ?? result?.script_result?.results?.[0]?.stdout ?? '';
-                const logfile = extractLogfile(stdout);
-                if (logfile) { 
-                    logfiles[id] = logfile; 
-                    addLog(`Logfile: ${logfile}`, 'success'); 
+                const files = extractAllLogfiles(stdout);
+                if (files.html || files.text) { 
+                    logfiles[id] = files;
+                    if (files.html) addLog(`HTML output: ${files.html}`, 'success');
+                    if (files.text) addLog(`Text log: ${files.text}`, 'success'); 
                     selectedWorkflow = id; 
                     logsExpanded = true; 
                     updateLogsPanel(); 
@@ -548,7 +577,24 @@
             }
         }
 
-        function extractLogfile(stdout) { if (!stdout) return null; const clean = stdout.replace(/\u001b\[[0-9;]*m/g, '').replace(/\/\/+/g, '/'); const match = clean.match(/(\/[A-Za-z0-9_\-\/\.]+\.log)/); return match ? match[1] : null; }
+        function extractLogfile(stdout) { 
+            if (!stdout) return null; 
+            const clean = stdout.replace(/\u001b\[[0-9;]*m/g, '').replace(/\/\/+/g, '/'); 
+            // First try to find HTML file
+            const htmlMatch = clean.match(/(\/[A-Za-z0-9_\-\/\.]+\.html)/);
+            if (htmlMatch) return htmlMatch[1];
+            // Fall back to log file
+            const logMatch = clean.match(/(\/[A-Za-z0-9_\-\/\.]+\.log)/); 
+            return logMatch ? logMatch[1] : null; 
+        }
+        
+        function extractAllLogfiles(stdout) {
+            if (!stdout) return { html: null, text: null };
+            const clean = stdout.replace(/\u001b\[[0-9;]*m/g, '').replace(/\/\/+/g, '/');
+            const htmlMatch = clean.match(/(\/[A-Za-z0-9_\-\/\.]+\.html)/);
+            const logMatch = clean.match(/(\/[A-Za-z0-9_\-\/\.]+\.log)/);
+            return { html: htmlMatch ? htmlMatch[1] : null, text: logMatch ? logMatch[1] : null };
+        }
 
         function toggleAgentSelection(name, checked) { if (checked) { if (!selectedAgents.includes(name)) selectedAgents.push(name); } else { selectedAgents = selectedAgents.filter(a => a !== name); } document.getElementById('selectedCount').textContent = selectedAgents.length; }
 
@@ -561,18 +607,65 @@
         }
 
         function updateLogsPanel() {
-            const panel = document.getElementById('logsPanel'), logfile = selectedWorkflow ? logfiles[selectedWorkflow] : null;
-            if (!selectedWorkflow || !logfile) { panel.classList.add('hidden'); return; }
+            const panel = document.getElementById('logsPanel');
+            const files = selectedWorkflow ? logfiles[selectedWorkflow] : null;
+            
+            // Handle both old format (string) and new format ({html, text})
+            const htmlFile = typeof files === 'object' ? files?.html : null;
+            const textFile = typeof files === 'object' ? files?.text : (typeof files === 'string' ? files : null);
+            
+            if (!selectedWorkflow || (!htmlFile && !textFile)) { 
+                panel.classList.add('hidden'); 
+                return; 
+            }
+            
             panel.classList.remove('hidden');
             document.getElementById('logsWorkflowId').textContent = selectedWorkflow;
-            document.getElementById('logsPath').textContent = logfile;
+            // Show HTML path if available (primary), otherwise text
+            document.getElementById('logsPath').textContent = htmlFile || textFile;
             document.getElementById('logsIcon').textContent = logsExpanded ? '▼' : '►';
             document.getElementById('logsContent').classList.toggle('hidden', !logsExpanded);
+            
+            // Show/hide buttons based on available files
+            // HTML is primary (btn-primary), Text is secondary
+            document.getElementById('btnViewHtml').style.display = htmlFile ? 'inline-block' : 'none';
+            document.getElementById('btnViewText').style.display = textFile ? 'inline-block' : 'none';
         }
 
         function toggleLogs() { logsExpanded = !logsExpanded; updateLogsPanel(); }
-        function viewLogfile() { const lf = logfiles[selectedWorkflow]; if (lf) window.open(`${API_BASE}/logs/file?path=${encodeURIComponent(lf)}`, '_blank'); }
-        function viewLiveLogs() { const lf = logfiles[selectedWorkflow]; if (lf) window.open(`${API_BASE}/logs/tail?path=${encodeURIComponent(lf)}`, '_blank'); }
+        
+        function viewHtmlLog() { 
+            const files = logfiles[selectedWorkflow]; 
+            const path = typeof files === 'object' ? files?.html : null;
+            if (path) window.open(`${API_BASE}/logs/file?path=${encodeURIComponent(path)}`, '_blank'); 
+        }
+        
+        function viewTextLog() { 
+            const files = logfiles[selectedWorkflow]; 
+            const path = typeof files === 'object' ? files?.text : (typeof files === 'string' ? files : null);
+            if (path) window.open(`${API_BASE}/logs/file?path=${encodeURIComponent(path)}`, '_blank'); 
+        }
+        
+        function viewLiveLogs() { 
+            const files = logfiles[selectedWorkflow]; 
+            // Prefer HTML file for live view
+            const path = typeof files === 'object' ? (files?.html || files?.text) : files;
+            if (path) window.open(`${API_BASE}/logs/tail?path=${encodeURIComponent(path)}`, '_blank'); 
+        }
+        
+        // Default view - opens HTML if available, otherwise text
+        function viewDefaultLog() {
+            const files = logfiles[selectedWorkflow];
+            const path = typeof files === 'object' ? (files?.html || files?.text) : files;
+            if (path) window.open(`${API_BASE}/logs/file?path=${encodeURIComponent(path)}`, '_blank');
+        }
+        
+        // Open log for specific workflow - opens HTML if available
+        function openWorkflowLog(workflowId) {
+            const files = logfiles[workflowId];
+            const path = typeof files === 'object' ? (files?.html || files?.text) : files;
+            if (path) window.open(`${API_BASE}/logs/file?path=${encodeURIComponent(path)}`, '_blank');
+        }
 
         function addLog(message, type = 'info') { const ts = new Date().toLocaleTimeString(); logs.push({ message, type, timestamp: ts }); if (logs.length > 50) logs.shift(); const ta = document.getElementById('activityLog'); ta.value = logs.map(l => `${l.timestamp} [${l.type.toUpperCase()}] ${l.message}`).join('\n'); ta.scrollTop = ta.scrollHeight; }
         function clearLogs() { logs = []; document.getElementById('activityLog').value = ''; }
