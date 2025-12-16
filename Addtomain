@@ -1,0 +1,15 @@
+# At the top with imports:
+from fastapi import Request
+from controller.routes.auth import auth_router
+from controller.routes.users import router as users_router
+
+# After creating FastAPI app:
+app.include_router(auth_router, prefix="/api")
+app.include_router(users_router, prefix="/api")
+
+# Add /whoami backward compatibility:
+@app.get("/whoami")
+async def whoami_root(request: Request):
+    from controller.routes.auth import whoami, get_current_user
+    user = await get_current_user(request)
+    return await whoami(request, user)
