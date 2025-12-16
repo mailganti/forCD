@@ -225,6 +225,47 @@
             box-shadow: 0 16px 35px rgba(15,23,42,0.9);
         }
 
+        /* Modal styles */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(4px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 1000; opacity: 0; visibility: hidden; transition: all 0.2s ease;
+        }
+        .modal-overlay.active { opacity: 1; visibility: visible; }
+        .modal {
+            background: var(--bg-panel); border: 1px solid var(--border-panel);
+            border-radius: 12px; width: 90%; max-width: 440px;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5); transform: scale(0.95); transition: transform 0.2s ease;
+        }
+        .modal-overlay.active .modal { transform: scale(1); }
+        .modal-header {
+            padding: 20px 24px; border-bottom: 1px solid var(--border-panel);
+            display: flex; align-items: center; gap: 12px;
+        }
+        .modal-icon { font-size: 24px; }
+        .modal-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+        .modal-subtitle { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+        .modal-body { padding: 20px 24px; }
+        .modal-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+        .modal-input {
+            width: 100%; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border-input);
+            background: var(--bg-input); color: var(--text-primary); font-size: 14px;
+            resize: vertical; min-height: 80px; font-family: inherit;
+        }
+        .modal-input:focus { outline: none; border-color: var(--sky-400); }
+        .modal-input::placeholder { color: var(--text-muted); }
+        .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border-panel); display: flex; gap: 12px; justify-content: flex-end; }
+        .modal-btn {
+            padding: 10px 20px; border-radius: 6px; font-size: 13px; font-weight: 500;
+            cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent;
+        }
+        .modal-btn-cancel { background: transparent; border-color: var(--border-input); color: var(--text-secondary); }
+        .modal-btn-cancel:hover { border-color: var(--text-muted); color: var(--text-primary); }
+        .modal-btn-danger { background: rgba(244, 63, 94, 0.2); border-color: rgba(244, 63, 94, 0.4); color: var(--rose-200); }
+        .modal-btn-danger:hover { background: rgba(244, 63, 94, 0.3); border-color: rgba(244, 63, 94, 0.6); }
+        .modal-workflow-id { font-family: monospace; color: var(--sky-400); background: var(--slate-bg-70); padding: 2px 8px; border-radius: 4px; }
+
         .hidden { display: none !important; }
     </style>
 </head>
@@ -357,6 +398,30 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- Deny Modal -->
+    <div class="modal-overlay" id="denyModal">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-icon">⚠️</span>
+                <div>
+                    <div class="modal-title">Deny Workflow</div>
+                    <div class="modal-subtitle">This action cannot be undone</div>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div style="margin-bottom: 16px; font-size: 13px; color: var(--text-secondary);">
+                    You are about to deny workflow <span class="modal-workflow-id" id="denyWorkflowId"></span>
+                </div>
+                <div class="modal-label">Reason for denial</div>
+                <textarea class="modal-input" id="denyReason" placeholder="Please provide a reason for denying this workflow..."></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="closeDenyModal()">Cancel</button>
+                <button class="modal-btn modal-btn-danger" onclick="confirmDeny()">Deny Workflow</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -531,14 +596,40 @@
             catch (err) { addLog(`Failed to approve: ${err.message}`, 'error'); }
         }
 
-        async function denyWorkflow(id) {
-            if (!confirm(`Are you sure you want to deny workflow ${id}?`)) return;
+        let pendingDenyWorkflowId = null;
+        
+        function denyWorkflow(id) {
+            pendingDenyWorkflowId = id;
+            document.getElementById('denyWorkflowId').textContent = id;
+            document.getElementById('denyReason').value = '';
+            document.getElementById('denyModal').classList.add('active');
+            document.getElementById('denyReason').focus();
+        }
+        
+        function closeDenyModal() {
+            document.getElementById('denyModal').classList.remove('active');
+            pendingDenyWorkflowId = null;
+        }
+        
+        async function confirmDeny() {
+            if (!pendingDenyWorkflowId) return;
+            const reason = document.getElementById('denyReason').value.trim() || 'Denied from dashboard';
             try { 
-                await apiCall(`/workflows/${id}/deny`, { method: 'POST', body: JSON.stringify({ denier: currentUser?.username || 'admin', reason: 'Denied from dashboard' }) }); 
-                addLog(`Workflow ${id} denied`, 'warning'); 
+                await apiCall(`/workflows/${pendingDenyWorkflowId}/deny`, { 
+                    method: 'POST', 
+                    body: JSON.stringify({ 
+                        denier: currentUser?.username || 'admin', 
+                        reason: reason 
+                    }) 
+                }); 
+                addLog(`Workflow ${pendingDenyWorkflowId} denied: ${reason}`, 'warning'); 
+                closeDenyModal();
                 loadData(); 
             }
-            catch (err) { addLog(`Failed to deny: ${err.message}`, 'error'); }
+            catch (err) { 
+                addLog(`Failed to deny: ${err.message}`, 'error'); 
+                closeDenyModal();
+            }
         }
 
         async function executeWorkflow(id) {
@@ -672,6 +763,19 @@
 
         function escapeHtml(t) { if (!t) return ''; const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
         function formatDate(ds) { if (!ds) return 'Never'; const d = new Date(ds), n = new Date(), m = Math.floor((n - d) / 60000); if (m < 1) return 'Just now'; if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return d.toLocaleDateString(); }
+        
+        // Modal keyboard support
+        document.addEventListener('keydown', (e) => {
+            const modal = document.getElementById('denyModal');
+            if (!modal.classList.contains('active')) return;
+            if (e.key === 'Escape') closeDenyModal();
+            if (e.key === 'Enter' && e.ctrlKey) confirmDeny();
+        });
+        
+        // Close modal on overlay click
+        document.getElementById('denyModal').addEventListener('click', (e) => {
+            if (e.target.id === 'denyModal') closeDenyModal();
+        });
     </script>
 </body>
 </html>
