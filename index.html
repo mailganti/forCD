@@ -335,7 +335,7 @@
                         <div class="form-group"><div class="form-label">Script ID</div><select class="form-input" id="wfScriptId"><option value="">Loading scripts...</option></select></div>
                         <div class="form-group"><div class="form-label">Requestor</div><input type="text" class="form-input" id="wfRequestor" value="" readonly></div>
                         <div class="form-group"><div class="form-label">Requestor Email</div><input type="email" class="form-input" id="wfRequestorEmail" placeholder="your.email@company.com"></div>
-                        <div class="form-group"><div class="form-label">Approver Email</div><input type="email" class="form-input" id="wfApproverEmail" placeholder="approver@company.com" required></div>
+                        <div class="form-group"><div class="form-label">Approver</div><select class="form-input" id="wfApproverEmail" required><option value="">Loading approvers...</option></select></div>
                         <div class="form-group full">
                             <div class="form-label">Target Agents (<span id="selectedCount">0</span> selected)</div>
                             <div class="agent-selector" id="agentSelector"><div style="padding: 0.25rem; text-align: center; color: var(--text-secondary); font-size: 11px;">No agents registered. Register an agent first →</div></div>
@@ -397,6 +397,35 @@
                     <textarea class="activity-log" id="activityLog" readonly></textarea>
                 </div>
             </section>
+
+            <!-- Scripts Panel -->
+            <section class="panel" style="grid-column: 1 / -1;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Scripts</div>
+                        <div class="panel-subtitle">Registered scripts available for workflows.</div>
+                    </div>
+                    <button class="btn" onclick="loadScripts()">Refresh</button>
+                </div>
+
+                <div class="table-container" style="max-height: 200px;">
+                    <table>
+                        <thead><tr><th>Script ID</th><th>Path</th><th>Description</th><th>Timeout</th></tr></thead>
+                        <tbody id="scriptsTable"><tr><td colspan="4" class="empty-row">No scripts registered</td></tr></tbody>
+                    </table>
+                </div>
+
+                <div class="form-section">
+                    <div class="form-title">Register Script</div>
+                    <div class="form-grid">
+                        <div class="form-group"><div class="form-label">Script ID</div><input type="text" class="form-input" id="scriptId" placeholder="my-script"></div>
+                        <div class="form-group"><div class="form-label">Script Path</div><input type="text" class="form-input" id="scriptPath" placeholder="/opt/scripts/my-script.sh"></div>
+                        <div class="form-group"><div class="form-label">Timeout (sec)</div><input type="number" class="form-input" id="scriptTimeout" value="300" min="1" max="3600"></div>
+                        <div class="form-group full"><div class="form-label">Description</div><input type="text" class="form-input" id="scriptDescription" placeholder="What this script does"></div>
+                    </div>
+                    <button class="btn btn-primary" onclick="registerScript()">Register Script</button>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -428,7 +457,7 @@
         const API_BASE = '/api';
         let currentUser = null, workflows = [], agents = [], scripts = [], selectedAgents = [], logs = [], logfiles = {}, selectedWorkflow = null, logsExpanded = true, loading = false;
 
-        document.addEventListener('DOMContentLoaded', () => { loadUserInfo(); loadScripts(); loadData(); setInterval(loadData, 30000); });
+        document.addEventListener('DOMContentLoaded', () => { loadUserInfo(); loadScripts(); loadApprovers(); loadData(); setInterval(loadData, 30000); });
 
         async function loadUserInfo() {
             try {
@@ -468,11 +497,13 @@
                     const data = await res.json();
                     scripts = data.scripts || [];
                     renderScriptDropdown();
+                    renderScriptsTable();
                     addLog(`Loaded ${scripts.length} scripts`, 'success');
                 }
             } catch (err) {
                 addLog(`Failed to load scripts: ${err.message}`, 'error');
                 renderScriptDropdown();
+                renderScriptsTable();
             }
         }
 
@@ -484,6 +515,95 @@
             }
             select.innerHTML = '<option value="">-- Select a script --</option>' + 
                 scripts.map(s => `<option value="${escapeHtml(s.script_id)}" title="${escapeHtml(s.description || '')}">${escapeHtml(s.script_id)}${s.description ? ' - ' + escapeHtml(s.description.substring(0, 30)) : ''}</option>`).join('');
+        }
+
+        function renderScriptsTable() {
+            const tbody = document.getElementById('scriptsTable');
+            if (scripts.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-row">No scripts registered</td></tr>';
+                return;
+            }
+            tbody.innerHTML = scripts.map(s => `
+                <tr>
+                    <td><span style="font-family: monospace; color: var(--sky-400);">${escapeHtml(s.script_id)}</span></td>
+                    <td style="font-size: 11px; color: var(--text-secondary); max-width: 300px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(s.script_path || s.path || '')}</td>
+                    <td style="font-size: 11px;">${escapeHtml(s.description || '-')}</td>
+                    <td style="font-size: 11px;">${s.timeout || 300}s</td>
+                </tr>
+            `).join('');
+        }
+
+        let approvers = [];
+        
+        async function loadApprovers() {
+            try {
+                const res = await fetch(`${API_BASE}/users/approvers`, { credentials: 'include' });
+                if (res.ok) {
+                    const data = await res.json();
+                    approvers = data.approvers || [];
+                    renderApproverDropdown();
+                    addLog(`Loaded ${approvers.length} approvers`, 'success');
+                } else {
+                    // Fallback: allow manual email entry
+                    renderApproverDropdown();
+                }
+            } catch (err) {
+                addLog(`Could not load approvers: ${err.message}`, 'info');
+                renderApproverDropdown();
+            }
+        }
+
+        function renderApproverDropdown() {
+            const select = document.getElementById('wfApproverEmail');
+            if (approvers.length === 0) {
+                // No approvers in DB - convert to text input for manual entry
+                const parent = select.parentElement;
+                const input = document.createElement('input');
+                input.type = 'email';
+                input.className = 'form-input';
+                input.id = 'wfApproverEmail';
+                input.placeholder = 'approver@company.com';
+                input.required = true;
+                select.replaceWith(input);
+                return;
+            }
+            select.innerHTML = '<option value="">-- Select approver --</option>' + 
+                approvers.map(a => {
+                    const display = a.full_name ? `${a.full_name} (${a.username})` : a.username;
+                    const email = a.email || '';
+                    return `<option value="${escapeHtml(email)}" title="${escapeHtml(a.role || 'approver')}">${escapeHtml(display)}${email ? ' - ' + escapeHtml(email) : ''}</option>`;
+                }).join('');
+        }
+
+        async function registerScript() {
+            const scriptId = document.getElementById('scriptId').value.trim();
+            const scriptPath = document.getElementById('scriptPath').value.trim();
+            const description = document.getElementById('scriptDescription').value.trim();
+            const timeout = parseInt(document.getElementById('scriptTimeout').value) || 300;
+
+            if (!scriptId) { addLog('Please enter a Script ID', 'error'); return; }
+            if (!scriptPath) { addLog('Please enter a Script Path', 'error'); return; }
+            if (!/^[a-zA-Z0-9_-]+$/.test(scriptId)) { addLog('Script ID must contain only letters, numbers, hyphens and underscores', 'error'); return; }
+
+            try {
+                await apiCall('/scripts/register', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        script_id: scriptId,
+                        script_path: scriptPath,
+                        description: description,
+                        timeout: timeout
+                    })
+                });
+                addLog(`Script '${scriptId}' registered successfully`, 'success');
+                document.getElementById('scriptId').value = '';
+                document.getElementById('scriptPath').value = '';
+                document.getElementById('scriptDescription').value = '';
+                document.getElementById('scriptTimeout').value = '300';
+                loadScripts();
+            } catch (err) {
+                addLog(`Failed to register script: ${err.message}`, 'error');
+            }
         }
 
         async function apiCall(endpoint, options = {}) {
