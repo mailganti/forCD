@@ -1,0 +1,13 @@
+CREATE TABLE IF NOT EXISTS "users" (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHARS2(255),
+    full_name VARCHAR(255),
+    email VARCHAR(255),
+    common_name varchar2(255),
+    role VARCHAR(50) DEFAULT 'viewer',  -- admin, approver, operator, viewer
+    auth_method VARCHAR(50) DEFAULT 'local',  -- local, ldap, oauth
+    created_at TEXT DEFAULT (datetime('now')),
+    last_login TEXT,
+    is_active BOOLEAN DEFAULT 1
+);
