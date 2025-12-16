@@ -106,3 +106,123 @@ ORDER BY u.username, r.priority DESC;
 -- JOIN user_roles ur ON u.user_id = ur.user_id
 -- JOIN roles r ON ur.role_id = r.role_id
 -- WHERE r.role_name = 'admin';
+
+
+
+-- ============================================================================
+-- Roles System Migration
+-- Run this to add multi-role support to your orchestration system
+-- ============================================================================
+
+-- 1. Create roles table
+CREATE TABLE IF NOT EXISTS roles (
+    role_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role_name VARCHAR(50) UNIQUE NOT NULL,
+    description VARCHAR(255),
+    priority INTEGER DEFAULT 0,  -- Higher priority = more permissions, used for default role selection
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- 2. Create user_roles mapping table (many-to-many)
+CREATE TABLE IF NOT EXISTS user_roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    role_id INTEGER NOT NULL,
+    assigned_at TEXT DEFAULT (datetime('now')),
+    assigned_by VARCHAR(255),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES roles(role_id) ON DELETE CASCADE,
+    UNIQUE(user_id, role_id)  -- Prevent duplicate assignments
+);
+
+-- 3. Insert default roles (priority determines default selection - highest first)
+INSERT OR IGNORE INTO roles (role_name, description, priority) VALUES 
+    ('admin', 'Full system access - manage agents, scripts, workflows, and users', 100),
+    ('approver', 'Can approve/deny workflow requests and view activity logs', 80),
+    ('operator', 'Can execute approved workflows and view activity logs', 60),
+    ('viewer', 'Can view workflows and activity logs (read-only)', 40),
+    ('user', 'Basic access - can create workflow requests only', 20);
+
+-- 4. Migrate existing user roles to new table
+-- This copies the current role from users table to user_roles
+INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by)
+SELECT 
+    u.user_id,
+    r.role_id,
+    'migration'
+FROM users u
+JOIN roles r ON LOWER(u.role) = LOWER(r.role_name)
+WHERE u.role IS NOT NULL AND u.role != '';
+
+-- 5. Create index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_user_roles_user_id ON user_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_roles_role_id ON user_roles(role_id);
+
+-- 6. Create view for easy user role queries
+CREATE VIEW IF NOT EXISTS v_user_roles AS
+SELECT 
+    u.user_id,
+    u.username,
+    u.full_name,
+    u.email,
+    r.role_id,
+    r.role_name,
+    r.description as role_description,
+    r.priority,
+    ur.assigned_at,
+    ur.assigned_by
+FROM users u
+JOIN user_roles ur ON u.user_id = ur.user_id
+JOIN roles r ON ur.role_id = r.role_id
+ORDER BY u.username, r.priority DESC;
+
+-- ============================================================================
+-- Workflow Script Parameters Support
+-- Add column to store parameters for script execution
+-- ============================================================================
+
+-- Add script_params column to workflows table if it doesn't exist
+-- SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we use a trick
+CREATE TABLE IF NOT EXISTS _migration_check (id INTEGER);
+DROP TABLE IF EXISTS _migration_check;
+
+-- Try to add the column (will fail silently if exists in most SQLite wrappers)
+-- If this fails, the column already exists - that's OK
+-- ALTER TABLE workflows ADD COLUMN script_params TEXT;
+
+-- Safer approach: Create new table and migrate if needed
+-- Only run this if script_params doesn't exist:
+-- 
+-- PRAGMA table_info(workflows);  -- Check if script_params exists
+-- If not, you can manually run:
+-- ALTER TABLE workflows ADD COLUMN script_params TEXT;
+
+-- ============================================================================
+-- Helper queries (run these manually as needed)
+-- ============================================================================
+
+-- Assign a role to a user:
+-- INSERT INTO user_roles (user_id, role_id, assigned_by) 
+-- SELECT u.user_id, r.role_id, 'admin'
+-- FROM users u, roles r 
+-- WHERE u.username = 'jsmith' AND r.role_name = 'approver';
+
+-- Remove a role from a user:
+-- DELETE FROM user_roles 
+-- WHERE user_id = (SELECT user_id FROM users WHERE username = 'jsmith')
+-- AND role_id = (SELECT role_id FROM roles WHERE role_name = 'viewer');
+
+-- Get all roles for a user:
+-- SELECT r.role_name, r.description FROM roles r
+-- JOIN user_roles ur ON r.role_id = ur.role_id
+-- JOIN users u ON ur.user_id = u.user_id
+-- WHERE u.username = 'jsmith';
+
+-- Get all users with a specific role:
+-- SELECT u.username, u.full_name FROM users u
+-- JOIN user_roles ur ON u.user_id = ur.user_id
+-- JOIN roles r ON ur.role_id = r.role_id
+-- WHERE r.role_name = 'admin';
+
+-- Add script_params column (run manually):
+-- ALTER TABLE workflows ADD COLUMN script_params TEXT;
